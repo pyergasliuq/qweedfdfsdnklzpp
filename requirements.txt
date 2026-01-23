@@ -1,9 +1,6 @@
 pillow
-pathlib
 opencv-python
 numpy
-shutil
-io
 matplotlib
 concurrent
 aiofiles
