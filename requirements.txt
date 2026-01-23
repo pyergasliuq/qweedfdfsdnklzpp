@@ -1,5 +1,6 @@
 pillow
 pathlib
+opencv-python
 numpy
 shutil
 io
@@ -10,4 +11,3 @@ json
 re
 structfrom
 zipfile
-cv2
