@@ -1,13 +1,4 @@
-aiogram
-asyncio
-logging
-sqlite3
-os
-datetime
-string
-random
 pillow
-zipfile
 pathlib
 numpy
 shutil
@@ -19,3 +10,4 @@ aiofiles
 json
 re
 structfrom
+zipfile
