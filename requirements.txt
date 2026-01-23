@@ -10,4 +10,4 @@ aiofiles
 json
 re
 structfrom
-zipfile
+zipfile36
