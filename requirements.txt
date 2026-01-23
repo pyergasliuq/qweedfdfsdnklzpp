@@ -4,10 +4,10 @@ numpy
 shutil
 io
 matplotlib
-cv2
 concurrent
 aiofiles
 json
 re
 structfrom
 zipfile
+cv2
