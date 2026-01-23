@@ -4,7 +4,5 @@ numpy
 matplotlib
 concurrent
 aiofiles
-json
-re
-structfrom
+struct
 zipfile36
