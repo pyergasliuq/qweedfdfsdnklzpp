@@ -1,6 +1,6 @@
 aiogram
 pillow
-opencv-python
+opencv-python==4.13.0.90
 numpy
 matplotlib
 concurrent
