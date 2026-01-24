@@ -3,7 +3,5 @@ pillow
 opencv-python-headless
 numpy
 matplotlib
-
 aiofiles
-
 zipfile36
