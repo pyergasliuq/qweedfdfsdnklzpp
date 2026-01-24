@@ -1,6 +1,6 @@
 aiogram
 pillow
-opencv-python-headless
+scikit-image
 numpy
 matplotlib
 aiofiles
