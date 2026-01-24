@@ -242,7 +242,7 @@ async def safe_delete(file_path: Path, max_attempts=3):
 
 async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
     try:
-        cmd = ["sudo",
+        cmd = [
             "./"+str(pvrtex_tool),
             "-i", str(input_path),
             "-o", str(temp_ktx),
@@ -259,7 +259,7 @@ async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
 
 async def convert_btx_to_png_pvr(temp_ktx: Path, output_path: Path) -> bool:
     try:
-        cmd = ["sudo",
+        cmd = [
             "./"+str(pvrtex_tool),
             "-i", str(temp_ktx),
             "-d", str(output_path),
@@ -2473,6 +2473,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
