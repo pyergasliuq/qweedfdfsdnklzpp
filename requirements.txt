@@ -3,7 +3,7 @@ pillow
 opencv-python-headless
 numpy
 matplotlib
-concurrent
+
 aiofiles
-struct
+
 zipfile36
