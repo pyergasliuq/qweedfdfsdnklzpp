@@ -41,7 +41,7 @@ FILE_SUFFIXES = ['logobrkrasnodar', 'logobrkaliningrad', 'logobrbelgorod', 'logo
 MAX_FILE_SIZE = 1024 * 1024 * 50
 Tree = ['417f945c', '43tree1', '43tree2', '43tree3', '43tree4', '43tree5', '43tree6', '43tree7', '43tree8', '43tree9', '44tree1', '44tree2', '44tree4', '44tree5', '9event_treesbg1', '9event_treesbg2', 'apat_flowers', 'AppleTree', 'AucTreeCrone8712', 'AucWeed8163', 'Bdup2_plant', 'beregd1_elka', 'beregd1_listv2', 'BRG_flowers1', 'BRTREE_Atl_B', 'BRTREE_leaf1', 'BRTREE_leaf1o', 'BRTREE_leaf2', 'BRTREE_leaf2o', 'BRTREE_leaf3', 'BRTREE_leaf4', 'BRTREE_leaf4o', 'BRTREE_leaf5', 'BRTREE_leaf5o', 'BRTREE_leaf6', 'BRTREE_leaf7', 'BRTREE_leaf8', 'BRTREE_leaf8o', 'BukTree1', 'BukTree2', 'bysaevo_grasssandmix', 'byssch_flower1', 'byssch_flower2', 'byssch_flower3', 'byssch_flower4', 'byssch_flower5', 'bys_appletree', 'bys_cherrytree', 'bys_flowers', 'bys_plumtree', 'bys_wires', 'b_craet1_4_ca', 'cactusL', 'CasinoNor3864', 'cj_flower(hi_res)cj_flower_a(h', 'CJ_FLOWER_256cj_flower_a', 'cj_leaf_cheesecj_leaf_cheese_a', 'CJ_PLANT', 'cottagetuya-2', 'cottagetuya', 'derevachkacrb', 'derevo', 'derevo3', 'derevoclub8201', 'derevoclub8201st', 'derevoclub82021', 'derevoclub82022', 'derevoclub8202st', 'derevoclub8203', 'derevoclub8203st', 'derevopar7901', 'derevopar7902', 'derevopar7903', 'derevopar7904', 'derevopar7905', 'derevo_krov', 'edovo_coundom_flower', 'f', 'fialkiflowers', 'flowert', 'free grass', 'freegrass', 'gameleaf01_64', 'gameleaf02_64', 'grass1', 'GrassAlpha7453', 'GrassA_02', 'GrassA_04', 'GrassA_05', 'GrassA_15', 'GrassA_15_1', 'GrassA_16', 'GrassA_20', 'GrassVazMast', 'Grass_00', 'grass_gen256old', 'grass_green_long', 'grass_green_med', 'gz_e2_fishleaf01gz_e2_fishleaf', 'gz_e2_fishleaf02gz_e2_fishleaf', 'gz_e2_fishleaf03gz_e2_fishleaf', 'gz_e2_leaf_cheesegz_e2_leaf_ch', 'hot_flowers1', 'int_fsb_flow1', 'int_fsb_flow1a', 'int_pr_flow1', 'int_pr_flow2', 'izbamishura', 'kbplanter_plants1', 'kb_balcony_ferns', 'kb_balcony_ferns_genintgeneric', 'kb_ivy2_256', 'klubnika', 'km_flowerpic2', 'km_plant1', 'kolosya_rog', 'KOR_grape', 'krapiva_list', 'kustik1', 'kustik2', 'KustRog8716', 'kust_farm1', 'kyst3', 'l', 'lager_trees1', 'lager_trees2', 'lag_reeds1', 'LeavesTropical0141_1', 'LeavesTropical0202_1', 'LeavesTropical0218_1', 'lentisk', 'lf_arzflowers1', 'list4', 'LODBRTREE_1_6_7_8', 'LODBRTREE_2_3', 'LODBRTREE_4_5_9_10', 'LODBRTREE_atl', 'LODbuktree2_a889', 'LODbuktree3_a889', 'LODbuktree4_a889', 'LODbuktree5_a889', 'LODbuktree6_a889', 'LODbuktree7_a889', 'LODbuktree8_a889', 'LODH_leaftree_big', 'LODH_leaftree_med', 'LODH_leaftree_root', 'LODH_leaftree_sml', 'LODH_leaftree_vol', 'LODH_pinetree1', 'LODH_pinetree2', 'LODH_pinetree3', 'LODH_Rdeadtree', 'lopux_koluchka', 'lopux_list', 'moss_shrek_a889', 'mp_flowerbush', 'mp_gs_flowerwall', 'mp_h_acc_vase_flowers_04', 'mp_h_acc_vase_leaves_03mp_h_acc', 'newtreeleaves128', 'newtreeleavesb128', 'NGMishura6121', 'NGMishura6121_2', 'nonalpha_compressedLOD_treeRUBH', 'NRock_kust1', 'NRock_kust2', 'Palm0471', 'palm8204', 'PalmArecaceae144', 'PalmWall2947', 'planta252', 'planta256', 'plantc256', 'PlantH1741', 'potato', 'rn_hell_flow', 'rus_bigORGANGEflower', 'rus_grasstype2', 'rus_grassTYPE3', 'rus_grasstype4_flowers', 'rus_whiteflower_ingrass', 'R_Berez1_b', 'R_Berez1_t', 'R_Dub1', 'R_hln_MgkLeaf1', 'R_hln_MgkLeaf2', 'R_hln_MgkLeaf3', 'R_Listv1', 'salad', 'sm_Agave_1', 'sm_Agave_2', 'sm_minipalm1', 'sm_potplant1', 'starflower2', 'starflower2wht', 'starflower3', 'starflower3prpl', 'starflower3yel', 'Strip_plant', 'stvolListv1', 'svekla', 'tikva', 'tomato', 'TomatoFarm', 'Tree', 'tree19Mi', 'treeCRB221_1', 'TreeCron9716', 'TreeCron9716_2', 'trees_vetkagreen5', 'treewillow99', 'tree_lodderevo1', 'tree_lodeubeech1', 'tree_lodfikovnik', 'tree_lodkastan', 'tree_lodlinden', 'tree_lodpaper_der1', 'tree_lodpaper_der2', 'tree_lodwillow', 'TREE_STUB1', 'tuyaclub8205', 'T_br5_FlwrVs', 'T_CM_Leaf_D', 'T_flg_Cl_Ch_A', 'T_flg_Cl_Ch_B', 'T_flg_Cl_CrTr_A', 'T_flg_Cl_CrTr_B', 'T_flg_Cl_Dead_A', 'T_flg_Cl_Hdg_A', 'T_flg_Cl_Lndn_A', 'T_flg_Cl_Mpl_A', 'T_flg_Cl_Poplar_A', 'T_flg_Cl_Shbrr_A', 'T_flg_Cl_Shbrr_B', 'T_flg_Cl_Th_A', 'T_flg_Cl_Th_B', 'T_flg_Cl_Th_C', 'T_flg_DeadBrunch_A', 'T_flg_DeadBrunch_B', 'T_flg_ForestGround', 'T_flg_Grss_V', 'T_flg_Grss_V2', 'T_flg_Grss_X', 'T_flg_Grss_Y', 'T_flg_Hdg_A', 'T_flg_ivy_A', 'T_flg_ivy_fall', 'T_flg_LeafA', 'T_flg_leafs', 'T_flg_Lndn_A_Low', 'T_flg_Moss_A', 'T_flg_Moss_B', 'T_flg_Moss_C', 'T_flg_NeedleA', 'T_flg_PalmLeaf_A', 'T_flg_ShoreGrassA', 'T_nn_TreesLODtex_a', 'T_nn_TreesLODtex_b', 'T_nn_TreesLODtex_c', 'UGPRST_der1', 'vk_int_gaz_grass1', 'vk_m9_ev_kust', 'WH_flowers1', 'yellosmallflowers', 'z-H-dc-Fern1', 'z_H_atl_grss_014']
 bild = ['reclam65', 'reclam66', 'Billb_SanVice', 'BLBRD_3_889', 'reclam67', 'BLBRD_1_a889', 'Billb_MyriadIslands', 'reclam64', 'Billb_AlienCity', 'bilb_sign1', 'BLBRD_btn1_a889', 'BLBRD_5_889', 'reclam69', 'BLBRD_main1_a889', 'Billb_GTABer', 'reclam68', 'BLBRD_6_889', 'reclam62', 'Billb_GostownParadise', 'reclam63', 'Billb_YouAreHere', 'bilb_sign2', 'Billb_GTAUnited', 'BLBRD_4_889', 'BLBRD_2_889']
-pvrtex_tool = Path(__file__).parent / "PVRTexToolCLI.sh"
+pvrtex_tool = "PVRTexToolCLI.sh"
 
 def compute_data_offset(zip_path: Path, header_offset: int) -> int:
     with zip_path.open('rb') as f:
@@ -243,7 +243,7 @@ async def safe_delete(file_path: Path, max_attempts=3):
 async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
     try:
         cmd = [
-            "./"+str(pvrtex_tool),
+            "./"+pvrtex_tool,
             "-i", str(input_path),
             "-o", str(temp_ktx),
             "-f", "ASTC_8x8,UBN,sRGB",
@@ -260,7 +260,7 @@ async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
 async def convert_btx_to_png_pvr(temp_ktx: Path, output_path: Path) -> bool:
     try:
         cmd = [
-            "./"+str(pvrtex_tool),
+            "./"+pvrtex_tool,
             "-i", str(temp_ktx),
             "-d", str(output_path),
             "-f", "r8g8b8a8",
@@ -2473,6 +2473,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
