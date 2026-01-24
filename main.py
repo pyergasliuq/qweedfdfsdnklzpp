@@ -9,14 +9,12 @@ import string
 import random
 from PIL import ImageColor, Image, ImageDraw, ImageFont
 from aiogram.types import FSInputFile, BufferedInputFile
-from aiogram.filters import Command
 import zipfile
 from pathlib import Path
 import numpy as np
 import shutil
 import io
 import matplotlib.colors as mcolors
-import cv2
 from concurrent.futures import ThreadPoolExecutor
 import aiofiles
 from aiogram.types.input_media_document import InputMediaDocument
@@ -25,6 +23,9 @@ from txd import TXDConverter
 import re
 from shutil import rmtree
 import struct
+from skimage.measure import label, regionprops
+from skimage.morphology import disk, closing, opening
+from skimage import exposure, color
 
 TOKEN = '7062207808:AAGkeSrwOrU7AvV3itW60HUJ3xaLxJmH12E'
 dp = Dispatcher()
@@ -559,49 +560,54 @@ def process_image_sync(file):
     img = Image.open(file).convert("RGBA")
     data = np.array(img)
     alpha = data[:, :, 3]
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, kernel)
-    alpha = cv2.morphologyEx(alpha, cv2.MORPH_OPEN, kernel)
-    binary = cv2.threshold(alpha, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    kernel_disk = disk(2)
+    hist = np.histogram(alpha, bins=256)[0]
+    otsu_thresh = exposure.is_low_contrast(
+        alpha)
+    binary = (alpha > 0).astype(np.uint8) * 255
+    from skimage.filters import threshold_otsu
+    try:
+        thresh_val = threshold_otsu(alpha)
+        binary = (alpha > thresh_val).astype(np.uint8) * 255
+    except ValueError:
+        binary = (alpha > 0).astype(np.uint8) * 255
+    binary_bool = binary.astype(bool)
+    closed_bool = closing(binary_bool, kernel_disk)
+    opened_bool = opening(closed_bool, kernel_disk)
+    labels = label(opened_bool, connectivity=2)
+    regions = regionprops(labels)
     objects = []
     min_pixels = 500
     padding = 10
-
-    for i in range(1, num_labels):
-        x, y, w, h, area = stats[i]
-
+    for props in regions:
+        area = props.area
         if area < min_pixels:
             continue
-
-        x1 = max(0, x - padding)
-        y1 = max(0, y - padding)
-        x2 = min(data.shape[1], x + w + padding)
-        y2 = min(data.shape[0], y + h + padding)
-
-        object_mask = (labels[y1:y2, x1:x2] == i).astype(np.uint8) * 255
-
-        object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
-
-        object_img = np.zeros((y2 - y1, x2 - x1, 4), dtype=np.uint8)
-        object_img[:, :, :3] = data[y1:y2, x1:x2, :3]
+        y1, x1, y2, x2 = props.bbox
+        x1_pad = max(0, x1 - padding)
+        y1_pad = max(0, y1 - padding)
+        x2_pad = min(data.shape[1], x2 + padding)
+        y2_pad = min(data.shape[0], y2 + padding)
+        object_img_data = data[y1_pad:y2_pad, x1_pad:x2_pad, :3]
+        relative_labels_slice = labels[y1_pad:y2_pad, x1_pad:x2_pad]
+        object_mask_bool = (relative_labels_slice == props.label)
+        object_mask_closed_bool = closing(object_mask_bool, kernel_disk)
+        object_mask = object_mask_closed_bool.astype(np.uint8) * 255
+        object_img = np.zeros((y2_pad - y1_pad, x2_pad - x1_pad, 4), dtype=np.uint8)
+        object_img[:, :, :3] = object_img_data
         object_img[:, :, 3] = object_mask
-
         objects.append((area, object_img))
-
     objects.sort(reverse=True, key=lambda x: x[0])
-
     if len(objects) == 6:
         prefixes = ['hud_back', 'hud_down', 'hud_up', 'hud_center', 'hud_menu', 'hud_donat_store']
     elif len(objects) == 5:
         prefixes = ['hud_down', 'hud_up', 'hud_center', 'hud_menu', 'hud_donat_store']
     else:
         prefixes = [f'hud_part_{i + 1}' for i in range(len(objects))]
-
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for i, (_, img) in enumerate(objects):
-            img_pil = Image.fromarray(img)
+        for i, (_, img_data) in enumerate(objects):
+            img_pil = Image.fromarray(img_data, 'RGBA')
             with io.BytesIO() as img_buffer:
                 img_pil.save(img_buffer, format='PNG')
                 filename = f"{prefixes[i]}.png" if i < len(prefixes) else f"hud_extra_{i + 1}.png"
@@ -934,61 +940,55 @@ async def get_user_status_async(user_id):
     return await asyncio.to_thread(find_user_data_in_sql, user_id)
 
 
-def apply_filter_on_bytes_optimized(image_bytes: bytes, filter_name: str) -> bytes:
-    np_arr = np.frombuffer(image_bytes, np.uint8)
-    img_bgr_alpha = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
-
-    if img_bgr_alpha is None:
-        raise ValueError("Не удалось декодировать изображение из байтов.")
-    if img_bgr_alpha.shape[2] == 3:
-        img_bgra = cv2.cvtColor(img_bgr_alpha, cv2.COLOR_BGR2BGRA)
-    else:
-        img_bgra = img_bgr_alpha
-    img_arr = img_bgra
-    bgr_channels = img_arr[:, :, :3]
+def apply_filter_on_bytes_optimized(image_bytes: bytes, filter_name: str):
+    img_pil = Image.open(io.BytesIO(image_bytes))
+    if img_pil.mode != 'RGBA':
+        img_pil = img_pil.convert('RGBA')
+    img_arr = np.array(img_pil)
+    rgb_channels = img_arr[:, :, :3]
     alpha_channel = img_arr[:, :, 3]
-    filtered_bgr = None
+    filtered_rgb = None
     filter_name = filter_name.lower()
     enhancement_factor = 1.5
     if filter_name == 'red':
-        temp_r = bgr_channels[:, :, 2].astype(np.uint16) * enhancement_factor
-        bgr_channels[:, :, 2] = np.clip(temp_r, 0, 255).astype(np.uint8)
-        filtered_bgr = bgr_channels
+        temp_r = rgb_channels[:, :, 0].astype(np.uint16) * enhancement_factor
+        rgb_channels[:, :, 0] = np.clip(temp_r, 0, 255).astype(np.uint8)
+        filtered_rgb = rgb_channels
     elif filter_name == 'green':
-        temp_g = bgr_channels[:, :, 1].astype(np.uint16) * enhancement_factor
-        bgr_channels[:, :, 1] = np.clip(temp_g, 0, 255).astype(np.uint8)
-        filtered_bgr = bgr_channels
+        temp_g = rgb_channels[:, :, 1].astype(np.uint16) * enhancement_factor
+        rgb_channels[:, :, 1] = np.clip(temp_g, 0, 255).astype(np.uint8)
+        filtered_rgb = rgb_channels
     elif filter_name == 'blue':
-        temp_b = bgr_channels[:, :, 0].astype(np.uint16) * enhancement_factor
-        bgr_channels[:, :, 0] = np.clip(temp_b, 0, 255).astype(np.uint8)
-        filtered_bgr = bgr_channels
+        temp_b = rgb_channels[:, :, 2].astype(np.uint16) * enhancement_factor
+        rgb_channels[:, :, 2] = np.clip(temp_b, 0, 255).astype(np.uint8)
+        filtered_rgb = rgb_channels
     elif filter_name == 'grayscale':
-        gray_2d = cv2.cvtColor(bgr_channels, cv2.COLOR_BGR2GRAY)
-        filtered_bgr = cv2.cvtColor(gray_2d, cv2.COLOR_GRAY2BGR)
+        gray_float = color.rgb2gray(rgb_channels)
+        gray_2d = (gray_float * 255).astype(np.uint8)
+        filtered_rgb = np.stack([gray_2d] * 3, axis=-1)
     elif filter_name == 'negate':
-        filtered_bgr = cv2.bitwise_not(bgr_channels)
+        filtered_rgb = 255 - rgb_channels
     elif filter_name == 'sepia':
         sepia_matrix = np.array([[0.272, 0.534, 0.131], [0.349, 0.686, 0.168], [0.393, 0.769, 0.189]]).T
-        bgr_float = bgr_channels.astype(np.float32)
-        filtered_bgr_float = np.dot(bgr_float, sepia_matrix)
-        filtered_bgr = np.clip(filtered_bgr_float, 0, 255).astype(np.uint8)
+        rgb_float = rgb_channels.astype(np.float32) / 255.0
+        filtered_rgb_float = np.dot(rgb_float, sepia_matrix.T)  # Note the transpose change due to numpy stacking
+        filtered_rgb = np.clip(filtered_rgb_float * 255.0, 0, 255).astype(np.uint8)
     elif filter_name == 'solarize':
         threshold = 128
-        mask = bgr_channels > threshold
-        filtered_bgr = bgr_channels.copy()
-        filtered_bgr[mask] = 255 - filtered_bgr[mask]
+        mask = rgb_channels > threshold
+        filtered_rgb = rgb_channels.copy()
+        filtered_rgb[mask] = 255 - filtered_rgb[mask]
     else:
         raise ValueError(f"Неизвестный или неподдерживаемый фильтр: '{filter_name}'")
-    final_img_bgra = cv2.merge([
-        filtered_bgr[:, :, 0],
-        filtered_bgr[:, :, 1],
-        filtered_bgr[:, :, 2],
+    final_img_arr = np.dstack([
+        filtered_rgb,
         alpha_channel
     ])
-    success, encoded_image = cv2.imencode('.png', final_img_bgra)
-    if not success:
-        raise Exception("Не удалось закодировать обработанное изображение в PNG.")
-    return encoded_image.tobytes()
+    final_img_pil = Image.fromarray(final_img_arr, 'RGBA')
+    with io.BytesIO() as img_buffer:
+        final_img_pil.save(img_buffer, format='PNG')
+        return img_buffer.getvalue()
+
 def sync_process_file_filter_task(file_path: Path, filter_name: str):
     with open(file_path, 'rb') as f:
         image_bytes_original = f.read()
