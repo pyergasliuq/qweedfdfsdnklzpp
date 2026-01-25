@@ -27,7 +27,7 @@ from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
 from skimage import exposure, color
 
-TOKEN = '7062207808:AAGkeSrwOrU7AvV3itW60HUJ3xaLxJmH12E'
+TOKEN = '7062207808:AAF5vGV9ndvzvW2Ray0rxTM9RsGWMuB5gBw'
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
@@ -2487,3 +2487,4 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
