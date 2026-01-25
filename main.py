@@ -25,7 +25,7 @@ from shutil import rmtree
 import struct
 from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
-from skimage import exposure, io
+from skimage import exposure
 
 TOKEN = '7062207808:AAF5vGV9ndvzvW2Ray0rxTM9RsGWMuB5gBw'
 dp = Dispatcher()
