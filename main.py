@@ -27,7 +27,7 @@ from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
 from skimage import exposure, color
 
-TOKEN = '7062207808:AAF5vGV9ndvzvW2Ray0rxTM9RsGWMuB5gBw'
+TOKEN = '7062207808:AAGkeSrwOrU7AvV3itW60HUJ3xaLxJmH12E'
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
@@ -963,9 +963,13 @@ def apply_filter_on_bytes_optimized(image_bytes: bytes, filter_name: str):
         rgb_channels[:, :, 2] = np.clip(temp_b, 0, 255).astype(np.uint8)
         filtered_rgb = rgb_channels
     elif filter_name == 'grayscale':
-        gray_float = color.rgb2gray(rgb_channels)
-        gray_2d = (gray_float * 255).astype(np.uint8)
-        filtered_rgb = np.stack([gray_2d] * 3, axis=-1)
+        gray_float = (
+                rgb_channels[:, :, 0] * 0.2125 +
+                rgb_channels[:, :, 1] * 0.7154 +
+                rgb_channels[:, :, 2] * 0.0721
+        )
+        gray_2d_uint8 = util.img_as_ubyte(gray_float)
+        filtered_rgb = np.stack([gray_2d_uint8] * 3, axis=-1)
     elif filter_name == 'negate':
         filtered_rgb = 255 - rgb_channels
     elif filter_name == 'sepia':
@@ -2235,7 +2239,7 @@ async def ok(message: types.Message):
         try:
             user = message.from_user.id
             y = await message.answer("Обрабатываю...")
-            j = message.caption.split()
+            j = message.text.split()
             if len(j) < 3:
                 await bot.send_message(user, "Неверный формат команды. Используйте: /particle <цвет> <размер>")
                 return
@@ -2487,4 +2491,3 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
-
