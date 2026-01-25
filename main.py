@@ -1687,9 +1687,17 @@ async def handle_document_processing(message: types.Message):
                 caption = '<b>⚡️Ваше изображение готово!</b>'
 
             elif file_format in ("png", "jpg"):
-                output_file_path = await convert_png_to_btx(str(src_path), file_name, work_dir)
-                caption = '<b>⚡️Ваша текстура готова!</b>'
-
+                    cmd = [
+                        "./"+pvrtex_tool,
+                        "-i", str(input_path),
+                        "-o", str(temp_ktx),
+                        "-f", "ASTC_8x8,UBN,sRGB",
+                        "-ics", "srgb",
+                        "-silent"
+                    ]
+                    process = await asyncio.create_subprocess_exec(*cmd)
+                    await process.wait()
+                    return temp_ktx.exists()
             elif file_format == "zip":
                 with zipfile.ZipFile(src_path, 'r') as zip_ref:
                     zip_ref.extractall(work_dir)
@@ -1712,11 +1720,6 @@ async def handle_document_processing(message: types.Message):
                             f_zip_out.write(file, file.name)
 
                 caption = '<b>⚡️Ваши файлы готовы!</b>'
-            f = FSInputFile(str(output_file_path))
-            await y.delete()
-            await bot.send_document(message.chat.id, f, caption=caption, parse_mode='HTML')
-            if work_dir.exists():
-                shutil.rmtree(work_dir)
         elif file_format == "dat":
             y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
             try:
@@ -2487,5 +2490,6 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
