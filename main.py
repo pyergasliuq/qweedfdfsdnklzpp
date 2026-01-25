@@ -1689,8 +1689,8 @@ async def handle_document_processing(message: types.Message):
             elif file_format in ("png", "jpg"):
                     cmd = [
                         "./"+pvrtex_tool,
-                        "-i", str(input_path),
-                        "-o", str(temp_ktx),
+                        "-i", str(src_path),
+                        "-o", str(work_dir / file_name2)+".ktx",
                         "-f", "ASTC_8x8,UBN,sRGB",
                         "-ics", "srgb",
                         "-silent"
@@ -2490,6 +2490,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
