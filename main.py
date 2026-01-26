@@ -29,10 +29,6 @@ from skimage import exposure
 import sys
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 try:
-    os.rename("PVRTexLibPy", "PVRTexLibPy.cpython-311-x86_64-linux-gnu.so")
-except:
-    ...
-try:
     import PVRTexLibPy as pvr
 except:
     ...
@@ -2487,6 +2483,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
