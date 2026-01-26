@@ -26,6 +26,10 @@ import struct
 from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
 from skimage import exposure
+import sys
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+import PVRTexLibPy as pvr
 
 TOKEN = '7062207808:AAF5vGV9ndvzvW2Ray0rxTM9RsGWMuB5gBw'
 dp = Dispatcher()
@@ -241,17 +245,13 @@ async def safe_delete(file_path: Path, max_attempts=3):
 
 async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
     try:
-        cmd = [
-            "./"+pvrtex_tool,
-            "-i", str(input_path),
-            "-o", str(temp_ktx),
-            "-f", "ASTC_8x8,UBN,sRGB",
-            "-ics", "srgb",
-            "-silent"
-        ]
-        process = await asyncio.create_subprocess_exec(*cmd)
-        await process.wait()
-        return temp_ktx.exists()
+        tex = pvr.PVRTexture(input_path)
+        res = tex.Transcode(
+            pvr.PixelFormat.ASTC_8x8, 
+            pvr.VariableType.UnsignedByteNorm, 
+            pvr.ColourSpace.sRGB
+        )
+        tex.SaveToFile(temp_ktx)
     except:
         return False
 
@@ -1683,21 +1683,12 @@ async def handle_document_processing(message: types.Message):
             await bot.download(file=message.document.file_id, destination=src_path)
             y = await message.answer("Обрабатываю...")
             if file_format == "btx":
-                output_file_path = await convert_btx_to_png(str(src_path), file_name2, work_dir)
+                output_file_path = await convert_btx_to_png(str(src_path), file_name, work_dir)
                 caption = '<b>⚡️Ваше изображение готово!</b>'
 
             elif file_format in ("png", "jpg"):
-                    cmd = [
-                        "./"+pvrtex_tool,
-                        "-i", str(src_path),
-                        "-o", str(work_dir / file_name2)+".ktx",
-                        "-f", "ASTC_8x8,UBN,sRGB",
-                        "-ics", "srgb",
-                        "-silent"
-                    ]
-                    process = await asyncio.create_subprocess_exec(*cmd)
-                    await process.wait()
-                    return temp_ktx.exists()
+                output_file_path = await convert_png_to_btx(str(src_path), file_name, work_dir)
+                caption = '<b>⚡️Ваше изображение готово!</b>'
             elif file_format == "zip":
                 with zipfile.ZipFile(src_path, 'r') as zip_ref:
                     zip_ref.extractall(work_dir)
@@ -2490,6 +2481,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
