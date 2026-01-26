@@ -28,7 +28,7 @@ from skimage.morphology import disk, closing, opening
 from skimage import exposure
 import sys
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-print(sys.version)
+import PVRTexLibPy as pvr
 
 TOKEN = '7062207808:AAF5vGV9ndvzvW2Ray0rxTM9RsGWMuB5gBw'
 dp = Dispatcher()
@@ -2479,6 +2479,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
