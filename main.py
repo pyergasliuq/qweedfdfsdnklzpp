@@ -27,6 +27,7 @@ from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
 from skimage import exposure
 import sys
+os.rename("PVRTexLibPy", "PVRTexLibPy.cpython-311-x86_64-linux-gnu.so")
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 import PVRTexLibPy as pvr
 
@@ -2479,6 +2480,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
