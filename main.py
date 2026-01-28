@@ -253,7 +253,7 @@ def convert_png_to_ktx_astc_linux(png_path: str,ktx_path: str,pvrt_cli_path: str
         raise RuntimeError(f"Failed to set execute permissions on '{pvrt_cli}': {e}") from e
     args = [str(pvrt_cli),"-i", str(png_file),"-o", str(ktx_file),"-f", f"{astc_format},{variable_type},{colour_space}","-q", quality]
     try:
-        subprocess.run(args,tdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
+        subprocess.run(args)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"PVRTexToolCLI failed: {e}") from e
 async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
@@ -2475,6 +2475,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
