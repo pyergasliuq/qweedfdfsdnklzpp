@@ -27,7 +27,7 @@ from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
 from skimage import exposure
 import sys
-
+import subprocess
 
 TOKEN = '7062207808:AAH6wIoxnsmjxeTRaOO9WXih4ZrGH9_JIeM'
 dp = Dispatcher()
@@ -2475,6 +2475,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
