@@ -27,11 +27,6 @@ from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
 from skimage import exposure
 import sys
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-try:
-    import PVRTexLibPy as pvr
-except:
-    ...
 
 
 TOKEN = '7062207808:AAF5vGV9ndvzvW2Ray0rxTM9RsGWMuB5gBw'
@@ -244,7 +239,23 @@ async def safe_delete(file_path: Path, max_attempts=3):
         except Exception:
             await asyncio.sleep(0.5 * (attempt + 1))
     return False
-
+def convert_png_to_ktx_astc_linux(png_path: str,ktx_path: str,pvrt_cli_path: str,astc_format="ASTC_8X8",variable_type="UBN",colour_space="sRGB",quality="astcthorough",):
+    png_file = Path(png_path)
+    ktx_file = Path(ktx_path)
+    pvrt_cli = Path(pvrt_cli_path)
+    if not png_file.is_file():
+        raise FileNotFoundError(f"PNG file not found: {png_file}")
+    if not pvrt_cli.is_file():
+        raise FileNotFoundError(f"PVRTexToolCLI not found: {pvrt_cli}")
+    try:
+        os.chmod(pvrt_cli, 0o755)
+    except Exception as e:
+        raise RuntimeError(f"Failed to set execute permissions on '{pvrt_cli}': {e}") from e
+    args = [str(pvrt_cli),"-i", str(png_file),"-o", str(ktx_file),"-f", f"{astc_format},{variable_type},{colour_space}","-q", quality]
+    try:
+        subprocess.run(args,tdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"PVRTexToolCLI failed: {e}") from e
 async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
     try:
         tex = pvr.PVRTexture(input_path)
@@ -256,31 +267,12 @@ async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
         tex.SaveToFile(temp_ktx)
     except:
         return False
-
-
-async def convert_btx_to_png_pvr(temp_ktx: Path, output_path: Path) -> bool:
-    try:
-        cmd = [
-            "./"+pvrtex_tool,
-            "-i", str(temp_ktx),
-            "-d", str(output_path),
-            "-f", "r8g8b8a8",
-            "-ics", "srgb",
-            "-silent"
-        ]
-        process = await asyncio.create_subprocess_exec(*cmd)
-        await process.wait()
-        return output_path.exists()
-    except:
-        return False
-
-
 async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir):
     output_filename = Path(original_filename).stem + '.btx'
     output_path = temp_dir / output_filename
     temp_ktx = temp_dir / f"temp_{random.randint(1000, 9999)}.ktx"
 
-    f = await convert_png_to_btx_pvr(input_path, temp_ktx)
+    f = await convert_png_to_ktx_astc_linux(input_path, temp_ktx, "./PVRTexToolCLI")
     btx_data = b'\x02\x00\x00\x00' + temp_ktx.read_bytes()
     output_path.write_bytes(btx_data)
     await safe_delete(temp_ktx)
@@ -2483,6 +2475,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
