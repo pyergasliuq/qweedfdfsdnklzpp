@@ -272,7 +272,7 @@ async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir)
     output_path = temp_dir / output_filename
     temp_ktx = temp_dir / f"temp_{random.randint(1000, 9999)}.ktx"
 
-    f = await convert_png_to_ktx_astc_linux(input_path, temp_ktx, "./PVRTexToolCLI.sh")
+    f = await convert_png_to_ktx_astc_linux(input_path, temp_ktx, "PVRTexToolCLI.sh")
     btx_data = b'\x02\x00\x00\x00' + temp_ktx.read_bytes()
     output_path.write_bytes(btx_data)
     await safe_delete(temp_ktx)
@@ -2475,6 +2475,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
