@@ -54,7 +54,7 @@ def compute_data_offset(zip_path: Path, header_offset: int) -> int:
         data_offset = header_offset + 30 + file_name_len + extra_field_len
         return data_offset
 
-def generate_bpcmeta(zip_path_str: str, output_path_str: str = None):
+def generate_bpcmeta(zip_path_str, output_path_str):
     zip_path = Path(zip_path_str)
     if output_path_str:
         out_path = Path(output_path_str)
@@ -1521,7 +1521,7 @@ async def handle_document_processing(message: types.Message):
         file_name = message.document.file_name
         download_path = work_dir / file_name
         await bot.download(file=message.document.file_id, destination=download_path)
-        await generate_bpcmeta( download_path, f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
+        await generate_bpcmeta(f'work/work_BPC/{r}/{file_name}', f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
         await y.delete()
         photo = FSInputFile(f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
         await bot.send_document(chat_id, photo, caption=f'<b>⚡️Твой генрл готов!</b>', parse_mode='HTML')
@@ -2475,6 +2475,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
