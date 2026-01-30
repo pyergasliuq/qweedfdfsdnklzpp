@@ -1521,7 +1521,7 @@ async def handle_document_processing(message: types.Message):
         file_name = message.document.file_name
         download_path = work_dir / file_name
         await bot.download(file=message.document.file_id, destination=download_path)
-        await generate_bpcmeta(f'work/work_BPC/{r}/{file_name}', f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
+        generate_bpcmeta(f'work/work_BPC/{r}/{file_name}', f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
         await y.delete()
         photo = FSInputFile(f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
         await bot.send_document(chat_id, photo, caption=f'<b>⚡️Твой генрл готов!</b>', parse_mode='HTML')
@@ -2475,6 +2475,7 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
