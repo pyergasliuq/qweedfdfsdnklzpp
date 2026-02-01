@@ -7,7 +7,7 @@ import datetime
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import string
 import random
-from PIL import ImageColor, Image, ImageDraw, ImageFont
+from PIL import ImageColor, Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter, ImageOps
 from aiogram.types import FSInputFile, BufferedInputFile
 import zipfile
 from pathlib import Path
@@ -25,9 +25,10 @@ from shutil import rmtree
 import struct
 from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
-from skimage import exposure
-import sys
-import subprocess
+from skimage import filters, color, exposure, util, restoration, transform
+from skimage import io as skio
+from skimage.filters import threshold_otsu
+from scipy.ndimage import gaussian_filter
 
 TOKEN = '7062207808:AAH6wIoxnsmjxeTRaOO9WXih4ZrGH9_JIeM'
 dp = Dispatcher()
@@ -239,63 +240,23 @@ async def safe_delete(file_path: Path, max_attempts=3):
         except Exception:
             await asyncio.sleep(0.5 * (attempt + 1))
     return False
-def convert_png_to_ktx_astc_linux(png_path: str,ktx_path: str,pvrt_cli_path: str,astc_format="ASTC_8X8",variable_type="UBN",colour_space="sRGB",quality="astcthorough",):
-    png_file = Path(png_path)
-    ktx_file = Path(ktx_path)
-    pvrt_cli = Path(pvrt_cli_path)
-    if not png_file.is_file():
-        raise FileNotFoundError(f"PNG file not found: {png_file}")
-    if not pvrt_cli.is_file():
-        raise FileNotFoundError(f"PVRTexToolCLI not found: {pvrt_cli}")
-    try:
-        os.chmod(pvrt_cli, 0o755)
-    except Exception as e:
-        raise RuntimeError(f"Failed to set execute permissions on '{pvrt_cli}': {e}") from e
-    args = [str(pvrt_cli),"-i", str(png_file),"-o", str(ktx_file),"-f", f"{astc_format},{variable_type},{colour_space}","-q", quality]
-    try:
-        subprocess.run(args)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"PVRTexToolCLI failed: {e}") from e
+
 async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
-    try:
-        tex = pvr.PVRTexture(input_path)
-        res = tex.Transcode(
-            pvr.PixelFormat.ASTC_8x8, 
-            pvr.VariableType.UnsignedByteNorm, 
-            pvr.ColourSpace.sRGB
-        )
-        tex.SaveToFile(temp_ktx)
-    except:
-        return False
+    ...
+    #ПОСЛЕ ОБНОВЛЕНИЯ СЕРВИСА
+
 async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir):
-    output_filename = Path(original_filename).stem + '.btx'
-    output_path = temp_dir / output_filename
-    temp_ktx = temp_dir / f"temp_{random.randint(1000, 9999)}.ktx"
+    ...
+    # после обноваления
 
-    f = await convert_png_to_ktx_astc_linux(input_path, temp_ktx, "PVRTexToolCLI.sh")
-    btx_data = b'\x02\x00\x00\x00' + temp_ktx.read_bytes()
-    output_path.write_bytes(btx_data)
-    await safe_delete(temp_ktx)
-    return output_path
-
+async def convert_btx_to_png_pvr(temp_ktx, output_path):
+    ...
+    # после обноваления
 
 
 async def convert_btx_to_png(input_path, original_filename: str, temp_dir):
-    input_path = Path(input_path)
-    output_filename = Path(original_filename).stem + '.png'
-    output_path = temp_dir / output_filename
-    temp_ktx = temp_dir / f"temp_{random.randint(1000, 9999)}.ktx"
-
-    try:
-        ktx_data = await asyncio.to_thread(input_path.read_bytes)
-        await asyncio.to_thread(temp_ktx.write_bytes, ktx_data[4:])
-
-        if not await convert_btx_to_png_pvr(temp_ktx, output_path):
-            return None
-
-        return output_path
-    finally:
-        await safe_delete(temp_ktx)
+    ...
+    # после обноваления
 
 async def process_bpc_file(file_name, message: types.Message, r, temp_dir):
     try:
@@ -489,7 +450,7 @@ def search_in_skins(query: str):
     return results
 
 
-async def file(id_xyina: str, name_xyina: str, message):
+async def filerpoisk(id_xyina: str, name_xyina: str, message):
     mod_name = name_xyina.replace('.mod', '').lower()
 
     dff_path = os.path.join('Editing', 'mod', f"{mod_name}.mod")
@@ -559,7 +520,6 @@ def process_image_sync(file):
     otsu_thresh = exposure.is_low_contrast(
         alpha)
     binary = (alpha > 0).astype(np.uint8) * 255
-    from skimage.filters import threshold_otsu
     try:
         thresh_val = threshold_otsu(alpha)
         binary = (alpha > thresh_val).astype(np.uint8) * 255
@@ -782,7 +742,7 @@ async def color(color_hex, src_zip_path: Path, original_zip_name: str, alpha=1.0
     processed_files_info = await asyncio.gather(*tasks)
     output_zip_dir = Path(f'work/work_HUD/{r}')
     await asyncio.to_thread(os.makedirs, output_zip_dir, exist_ok=True)
-    output_zip_path = output_zip_dir / f'{original_zip_name}_recolored_{r}.zip'
+    output_zip_path = output_zip_dir / f'{original_zip_name}_{r}.zip'
     with zipfile.ZipFile(output_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as f:
         for image_bytes, arcname in processed_files_info:
             f.writestr(arcname, image_bytes)
@@ -845,7 +805,7 @@ async def color_optimized(color_hex, src_zip_path: Path, original_zip_name: str,
     output_zip_dir = Path(f'work/work_HUD/{r}')
     work_dir = Path(f'work/work_HUD/{r}')
     await asyncio.to_thread(os.makedirs, output_zip_dir, exist_ok=True)
-    output_zip_path = output_zip_dir / f'{original_zip_name}_recolored_{r}.zip'
+    output_zip_path = output_zip_dir / f'{original_zip_name}_{r}.zip'
     with zipfile.ZipFile(output_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as f:
         for image_bytes, arcname in processed_files_info:
             f.writestr(arcname, image_bytes)
@@ -908,15 +868,31 @@ def parse_text(text):
         pass
     return hex_color, alpha
 
+def parse_quality(text):
+    parts = text.split()
+    if '/quality' not in parts:
+        return None
+    try:
+        qua = parts[1]
+    except IndexError:
+        return None
+    return qua
+
 def parse_filter(caption):
     parts = caption.split()
     if '/filters' not in parts:
-        return None, None, None
+        return None, None
     try:
         filter = parts[1]
     except IndexError:
         return None, None, None
-    return filter
+    colvo = 50
+    try:
+        if len(parts) > 2:
+            colvo = int(parts[2])
+    except ValueError:
+        pass
+    return filter, colvo
 
 def find_user_data_in_sql(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -934,7 +910,7 @@ async def get_user_status_async(user_id):
     return await asyncio.to_thread(find_user_data_in_sql, user_id)
 
 
-def apply_filter_on_bytes_optimized(image_bytes: bytes, filter_name: str):
+def apply_filter_on_bytes_optimized(image_bytes: bytes, filter_name: str, colvo):
     img_pil = Image.open(io.BytesIO(image_bytes))
     if img_pil.mode != 'RGBA':
         img_pil = img_pil.convert('RGBA')
@@ -972,6 +948,23 @@ def apply_filter_on_bytes_optimized(image_bytes: bytes, filter_name: str):
         mask = rgb_channels > threshold
         filtered_rgb = rgb_channels.copy()
         filtered_rgb[mask] = 255 - filtered_rgb[mask]
+    elif filter_name == 'light':
+        filtered_rgb = np.clip(rgb_channels.astype(np.int16) + colvo, 0, 255).astype(np.uint8)
+
+    elif filter_name == 'saturation':
+        from matplotlib.colors import rgb_to_hsv, hsv_to_rgb
+        hsv = rgb_to_hsv(rgb_channels / 255.0)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1 + colvo / 100.0), 0, 1)
+        filtered_rgb = (hsv_to_rgb(hsv) * 255).astype(np.uint8)
+
+    elif filter_name == 'contrast':
+        factor = (259 * (colvo + 255)) / (255 * (259 - colvo))
+        filtered_rgb = np.clip(factor * (rgb_channels.astype(np.float32) - 128) + 128, 0, 255).astype(np.uint8)
+
+    elif filter_name == 'clarity':
+        blurred = gaussian_filter(rgb_channels.astype(np.float32), sigma=1, axes=(0, 1))
+        sharpened = rgb_channels + (rgb_channels - blurred) * (colvo / 50.0)
+        filtered_rgb = np.clip(sharpened, 0, 255).astype(np.uint8)
     else:
         raise ValueError(f"Неизвестный или неподдерживаемый фильтр: '{filter_name}'")
     final_img_arr = np.dstack([
@@ -1078,6 +1071,7 @@ def process_aim_image_optimized(image_bytes):
     buffer.seek(0)
     return buffer.getvalue()
 
+
 async def recolor_zip_optimized(target_hex, replacement_hex, tolerance, src_zip_path: Path):
     target_rgb_tuple = tuple(int(target_hex.strip('#')[i:i + 2], 16) for i in (0, 2, 4))
     replacement_rgb_tuple = tuple(int(replacement_hex.strip('#')[i:i + 2], 16) for i in (0, 2, 4))
@@ -1090,6 +1084,47 @@ async def recolor_zip_optimized(target_hex, replacement_hex, tolerance, src_zip_
     processed_files_info = []
     with ThreadPoolExecutor() as executor:
         tasks = [loop.run_in_executor(executor,_apply_recolor_to_bytes,image_bytes,target_rgb_tuple,replacement_rgb_tuple,tolerance)
+            for filename, image_bytes in files_to_process]
+        results = await asyncio.gather(*tasks)
+        for i, result_bytes in enumerate(results):
+            if result_bytes is not None:
+                processed_files_info.append((result_bytes, files_to_process[i][0]))
+    buffer_out = io.BytesIO()
+    with zipfile.ZipFile(buffer_out, 'w', compression=zipfile.ZIP_DEFLATED) as f_out:
+        for image_bytes_result, arcname in processed_files_info:
+            f_out.writestr(arcname, image_bytes_result)
+    buffer_out.seek(0)
+    return buffer_out.getvalue()
+
+
+def quality_func(image_bytes: bytes, level):
+    level = int(level)
+    image = Image.open(io.BytesIO(image_bytes))
+    if image.mode != 'RGBA':
+        image = image.convert('RGBA')
+    for _ in range(max(1, int(level / 10))):
+        image = image.filter(ImageFilter.MedianFilter(size=3))
+    size_increase_factor = 1.5
+    new_size = (int(image.width * size_increase_factor), int(image.height * size_increase_factor))
+    image = image.resize(new_size, Image.LANCZOS)
+    for _ in range(2):
+        image = image.filter(ImageFilter.SMOOTH)
+    image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150 + level, threshold=3))
+    contrast_enhancer = ImageEnhance.Contrast(image)
+    image = contrast_enhancer.enhance(1.1 + (level * 0.005))
+    output_buffer = io.BytesIO()
+    image.save(output_buffer, format='PNG', optimize=True)
+    return output_buffer.getvalue()
+async def quality_zip(level, src_zip_path: Path):
+    files_to_process = []
+    with zipfile.ZipFile(src_zip_path, 'r') as src_zip:
+        for zip_info in src_zip.infolist():
+            if not zip_info.is_dir() and zip_info.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                files_to_process.append((zip_info.filename, src_zip.read(zip_info.filename)))
+    loop = asyncio.get_running_loop()
+    processed_files_info = []
+    with ThreadPoolExecutor() as executor:
+        tasks = [loop.run_in_executor(executor,quality_func,image_bytes,level)
             for filename, image_bytes in files_to_process]
         results = await asyncio.gather(*tasks)
         for i, result_bytes in enumerate(results):
@@ -1191,7 +1226,7 @@ async def handle_document_processing(message: types.Message):
             image_bytes_original = io.BytesIO()
             await bot.download(file=message.document.file_id, destination=image_bytes_original)
             processed_bytes = await asyncio.to_thread(_process_image_bytes, image_bytes_original.getvalue(),hex_color, alpha)
-            f = types.BufferedInputFile(processed_bytes, filename=f"recolored_{file_name}")
+            f = types.BufferedInputFile(processed_bytes, filename=f"{file_name}")
             await message.answer_document(f, caption='<b>⚡️Файл готов!</b>', parse_mode='HTML')
         elif file_format == "zip":
             await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
@@ -1207,7 +1242,7 @@ async def handle_document_processing(message: types.Message):
         if src_dir.exists():
             await asyncio.to_thread(shutil.rmtree, src_dir)
     elif '/filters' in caption:
-        filter = parse_filter(caption)
+        filter, colvo = parse_filter(caption)
         if not filter:
             await message.answer("❔ Пример использования: `/filters red`\n"
                 "-➤ Фильтры:\n└ red — усиление красного канала\n└ green — усиление зеленого канала\n└ blue — усиление синего канала\n└ grayscale — применение эффекта чёрно - белой палитры\n└ negate — создание эффекта негатива\n└ sepia — добавление теплого сепийного тона\n└ solarize — эффект передержки изображения",parse_mode='Markdown')
@@ -1219,8 +1254,9 @@ async def handle_document_processing(message: types.Message):
         if file_format in ["jpeg", "jpg", "png"]:
             image_bytes_original = io.BytesIO()
             await bot.download(file=message.document.file_id, destination=image_bytes_original)
-            processed_bytes = await asyncio.to_thread(apply_filter_on_bytes_optimized, image_bytes_original.getvalue(), filter)
-            f = types.BufferedInputFile(processed_bytes, filename=f"filtered_{file_name}")
+            processed_bytes = await asyncio.to_thread(apply_filter_on_bytes_optimized, image_bytes_original.getvalue(), filter, colvo)
+            f = types.BufferedInputFile(processed_bytes, filename=f"{file_name}")
+            await processing_message.delete()
             await message.answer_document(f, caption='<b>⚡️Файл готов!</b>', parse_mode='HTML')
         elif file_format == "zip":
             await bot.download(file=message.document.file_id, destination=download_path)
@@ -1247,7 +1283,7 @@ async def handle_document_processing(message: types.Message):
                 await bot.download(file=message.document.file_id, destination=image_bytes_original)
                 processed_bytes = await asyncio.to_thread(_apply_recolor_to_bytes,image_bytes_original.getvalue(),target_hex,replacement_hex,tolerance)
                 if processed_bytes:
-                    f = BufferedInputFile(processed_bytes, filename=f"recolored_{file_name}")
+                    f = BufferedInputFile(processed_bytes, filename=f"{file_name}")
                     await message.answer_document(f, caption='<b>⚡️Файл готов!</b>', parse_mode='HTML')
                 else:
                     await message.answer("Произошла ошибка при обработке изображения.")
@@ -1262,6 +1298,42 @@ async def handle_document_processing(message: types.Message):
                 f = FSInputFile(str(output_zip_path))
                 await processing_message.delete()
                 await bot.send_document(message.chat.id, f, caption=f'<b>⚡️ZIP с перекраской готов!</b>', parse_mode='HTML')
+                await asyncio.to_thread(os.remove, download_path)
+                await asyncio.to_thread(os.remove, output_zip_path)
+            else:
+                await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
+        except Exception as e:
+            logging.exception("An error occurred during recolor process")
+            await message.answer(f"Произошла непредвиденная ошибка: {e}")
+        finally:
+            try:
+                await processing_message.delete()
+            except Exception:
+                pass
+    elif '/quality' in caption:
+        level = parse_quality(caption)
+        if not level:
+            await message.answer("❔ Пример: `/qualiti 16`", parse_mode='Markdown')
+            return
+        processing_message = await message.answer("Обрабатываю...")
+        try:
+            if file_format in ["jpeg", "jpg", "png"]:
+                image_bytes_original = io.BytesIO()
+                await bot.download(file=message.document.file_id, destination=image_bytes_original)
+                processed_bytes = await asyncio.to_thread(quality_func,image_bytes_original.getvalue(),level)
+                f = BufferedInputFile(processed_bytes, filename=f"{file_name}")
+                await message.answer_document(f, caption='<b>⚡️Файл готов!</b>', parse_mode='HTML')
+
+            elif file_format == "zip":
+                download_path = Path(f'work/temp_downloads/src_{r}.zip')
+                await asyncio.to_thread(os.makedirs, download_path.parent, exist_ok=True)
+                await bot.download(file=message.document.file_id, destination=download_path)
+                zip_bytes_result = await quality_zip(level, download_path)
+                output_zip_path = Path(f'work/temp_downloads/out_{r}.zip')
+                await asyncio.to_thread(output_zip_path.write_bytes, zip_bytes_result)
+                f = FSInputFile(str(output_zip_path))
+                await processing_message.delete()
+                await bot.send_document(message.chat.id, f, caption=f'<b>⚡️ZIP с качеством готов!</b>', parse_mode='HTML')
                 await asyncio.to_thread(os.remove, download_path)
                 await asyncio.to_thread(os.remove, output_zip_path)
             else:
@@ -1665,6 +1737,8 @@ async def handle_document_processing(message: types.Message):
                 result, caption=f'<b>⚡️Ваша модель готова!</b>', parse_mode='HTML')
 
         elif file_format in ["btx", "png", "jpg", "jpeg" , "zip"]:
+            y = await message.answer("В данный момент мы чиним и конверт BTX не работает")
+            return
             work_dir = Path(f'work/work_BTX/{r}')
             file_name = message.document.file_name
             file_name2 = Path(file_name).stem
@@ -2278,7 +2352,7 @@ async def ok(message: types.Message):
             await message.answer(f"Нет информации о - {query} ID/NAME")
         else:
             id_xyina, name_xyina = results[0]
-            attached_files = await file(id_xyina, name_xyina, message)
+            attached_files = await filerpoisk(id_xyina, name_xyina, message)
             response = []
             if attached_files:
                 response.extend(attached_files)
@@ -2349,6 +2423,10 @@ async def ok(message: types.Message):
 └ negate - создание эффекта негатива
 └ sepia - добавление теплого сепийного тона
 └ solarize - эффект передержки изображения
+└ light - яркось регулируемая
+└ saturation - насыщеность регулируемая
+└ contrast - контраст регулируемый
+└ clarity - четкость регулируемая
 
 <b>📂 Создание файлов:</b>
 /weapon - Создание weapon.dat
@@ -2475,22 +2553,3 @@ async def main() -> None:
     await dp.start_polling(bot)
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
