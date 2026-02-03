@@ -1467,7 +1467,7 @@ async def handle_document_processing(message: types.Message):
                 if processed_bytes:
                     bio = io.BytesIO(processed_bytes)
                     bio.name = file_name
-                    t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
+                    await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
                                         parse_mode="HTML")
                 else:
                     await message.answer("Произошла ошибка при обработке изображения.")
@@ -2804,6 +2804,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
