@@ -406,12 +406,12 @@ async def process_bpc_file(file_name, message: types.Message, r, temp_dir):
 
             name = message.from_user.first_name
             await t_client.send_file(message.chat.id, zip_path, caption='<b>⚡️Ваш файл готов!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
 
         else:
             name = message.from_user.first_name
             await t_client.send_file(message.chat.id, decrypted_file,
-                                      caption='<b>⚡️Ваш файл готов!</b>', parse_mode="HTML")
+                                      caption='<b>⚡️Ваш файл готов!</b>', parse_mode="HTML", force_document=True)
 
     finally:
         if os.path.exists(temp_dir):
@@ -431,7 +431,7 @@ async def process_zip_file(file_name, message: types.Message, r, temp_dir):
 
     write_bytes_to_file(encrypted_file, encrypted)
     await t_client.send_file(message.chat.id, encrypted_file, caption='<b>⚡️Ваш файл готов!</b>',
-                              parse_mode="HTML")
+                              parse_mode="HTML", force_document=True)
 
 
 def read_file_bytes(file_path):
@@ -482,7 +482,7 @@ def is_valid_filename(filename):
 async def handle_valid_files(message: types.Message, ):
     name = message.from_user.first_name
 
-    progress_msg = await message.reply(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
+    progress_msg = await message.reply(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
 
     try:
         if message.document.file_name.lower().endswith('.bpc'):
@@ -1394,7 +1394,7 @@ async def handle_document_processing(message: types.Message):
         src_dir = Path(f'work/work_COLOR/{r}')
         await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
         download_path = src_dir / file_name
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
+        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
         if file_format in ["jpeg", "jpg", "png"]:
             await p_app.download_media(message.document, file_name=download_path)
             processed_bytes = await asyncio.to_thread(_process_image_bytes, download_path, hex_color,
@@ -1403,7 +1403,7 @@ async def handle_document_processing(message: types.Message):
             bio.name = file_name
             bio.seek(0)
             await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
         elif file_format == "zip":
             await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
             await p_app.download_media(message.document.file_id, file_name=download_path)
@@ -1411,7 +1411,7 @@ async def handle_document_processing(message: types.Message):
             work_dir_parent, output_zip_path = await color_optimized(hex_color, download_path, file_name2, alpha)
             await y.delete()
             await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Файл готов!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
             await asyncio.to_thread(os.remove, output_zip_path)
         else:
             await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
@@ -1437,7 +1437,7 @@ async def handle_document_processing(message: types.Message):
             bio.seek(0)
             await processing_message.delete()
             await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
         elif file_format == "zip":
             await p_app.download_media(message.document.file_id, file_name=download_path)
             file_name_stem = download_path.stem
@@ -1445,7 +1445,7 @@ async def handle_document_processing(message: types.Message):
             await processing_message.delete()
             await t_client.send_file(message.chat.id, output_zip_path,
                                       caption=f'<b>⚡️ZIP с фильтром "{filter}" готов!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
             await asyncio.to_thread(os.remove, download_path)
             await asyncio.to_thread(os.remove, output_zip_path)
             await asyncio.to_thread(shutil.rmtree, src_dir)
@@ -1471,7 +1471,7 @@ async def handle_document_processing(message: types.Message):
                     bio.name = file_name
                     bio.seek(0)
                     await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                        parse_mode="HTML")
+                                        parse_mode="HTML", force_document=True)
                 else:
                     await message.answer("Произошла ошибка при обработке изображения.")
 
@@ -1484,7 +1484,7 @@ async def handle_document_processing(message: types.Message):
                 await asyncio.to_thread(output_zip_path.write_bytes, zip_bytes_result)
                 await processing_message.delete()
                 await t_client.send_file(message.chat.id, output_zip_path,
-                                          caption=f'<b>⚡️ZIP с перекраской готов!</b>', parse_mode="HTML")
+                                          caption=f'<b>⚡️ZIP с перекраской готов!</b>', parse_mode="HTML", force_document=True)
                 await asyncio.to_thread(os.remove, download_path)
                 await asyncio.to_thread(os.remove, output_zip_path)
             else:
@@ -1514,7 +1514,7 @@ async def handle_document_processing(message: types.Message):
                 bio.name = file_name
                 bio.seek(0)
                 await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                          parse_mode="HTML")
+                                          parse_mode="HTML", force_document=True)
 
             elif file_format == "zip":
                 download_path = Path(f'work/temp_downloads/src_{r}.zip')
@@ -1525,7 +1525,7 @@ async def handle_document_processing(message: types.Message):
                 await asyncio.to_thread(output_zip_path.write_bytes, zip_bytes_result)
                 await processing_message.delete()
                 await t_client.send_file(message.chat.id, output_zip_path,
-                                          caption=f'<b>⚡️ZIP с качеством готов!</b>', parse_mode="HTML")
+                                          caption=f'<b>⚡️ZIP с качеством готов!</b>', parse_mode="HTML", force_document=True)
                 await asyncio.to_thread(os.remove, download_path)
                 await asyncio.to_thread(os.remove, output_zip_path)
             else:
@@ -1552,7 +1552,7 @@ async def handle_document_processing(message: types.Message):
             bio = io.BytesIO(processed_bytes)
             bio.name = f"aim_{file_name}"
             await t_client.send_file(message.chat.id, bio, caption=f'<b>⚡️Прицел готов!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
         except Exception as e:
             logging.exception("An error occurred during /aim processing")
             await message.answer(f"Произошла ошибка при обработке: {e}")
@@ -1588,7 +1588,7 @@ async def handle_document_processing(message: types.Message):
             bio.name = f"compressed_{original_stem}.{new_format}"
             await processing_message.delete()
             await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
         elif file_format == "zip":
             await p_app.download_media(file_id, destination=download_path)
             file_name_stem = download_path.stem
@@ -1596,7 +1596,7 @@ async def handle_document_processing(message: types.Message):
             await asyncio.to_thread(_process_zip_sync, download_path, output_zip_path, target_size)
             await processing_message.delete()
             await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Файл готов!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
         else:
             await processing_message.delete()
             await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
@@ -1638,7 +1638,7 @@ async def handle_document_processing(message: types.Message):
             await y.delete()
             i = FSInputFile(zip_path)
             await t_client.send_file(chat_id=message.chat.id, document=i, caption=f'<b>⚡️Ваши деревья готовы!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
         except Exception as e:
             await message.answer(f"Произошла ошибка: {e}")
         finally:
@@ -1659,7 +1659,7 @@ async def handle_document_processing(message: types.Message):
             await y.delete()
             i = FSInputFile(zip_path)
             await t_client.send_file(message.chat.id, i, caption=f'<b>⚡️Ваши билдборды готовы!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
         except Exception as e:
             await message.answer(f"Произошла ошибка: {e}")
         finally:
@@ -1764,7 +1764,7 @@ async def handle_document_processing(message: types.Message):
             bio = io.BytesIO(zip_buffer)
             bio.name = f"hudcut_{r}.zip"
             await t_client.send_file(message.chat.id, bio,
-                                      caption=f'<b>⚡️Ваш нарезаный худ готов!</b>', parse_mode="HTML")
+                                      caption=f'<b>⚡️Ваш нарезаный худ готов!</b>', parse_mode="HTML", force_document=True)
         except Exception as e:
             logging.exception("Ошибка hudcut")
         finally:
@@ -1792,7 +1792,7 @@ async def handle_document_processing(message: types.Message):
         if not document.file_name.lower().endswith('.bpc'):
             await message.answer("Пожалуйста, загрузите файл с расширением .bpc.")
             return
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
+        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
         work_dir = Path(f'work/work_BPC/{r}')
         await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
         file_name = message.document.file_name
@@ -1802,7 +1802,7 @@ async def handle_document_processing(message: types.Message):
         await y.delete()
         photo = FSInputFile(f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
         await t_client.send_file(chat_id=chat_id, document=photo, caption=f'<b>⚡️Твой генрл готов!</b>',
-                                  parse_mode="HTML")
+                                  parse_mode="HTML", force_document=True)
     elif "/bpc" in caption:
         for id in loging_id:
             await boti.send_message(id,
@@ -1816,7 +1816,7 @@ async def handle_document_processing(message: types.Message):
         for id in loging_id:
             await boti.send_message(id,
                                     f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
+        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
         file_name = message.document.file_name
         temp_dir = os.path.join(f"work/work_Z2N/{r}")
         os.makedirs(temp_dir, exist_ok=True)
@@ -1825,7 +1825,7 @@ async def handle_document_processing(message: types.Message):
         i = convert_zip2nonerai(f'work/work_Z2N/{r}/{file_name}', temp_dir)
         await y.delete()
         await t_client.send_file(message.chat.id, i, caption='<b>⚡️Твоя сборка готова!</b>',
-                                  parse_mode="HTML")
+                                  parse_mode="HTML", force_document=True)
         shutil.rmtree(temp_dir)
     else:
         if file_format == "ifp":
@@ -1854,7 +1854,7 @@ async def handle_document_processing(message: types.Message):
                 er.write(new_data)
             await y.delete()
             await t_client.send_file(message.chat.id, f'work/work_ANI/{r}/{file_name2}.ani',
-                                      caption=f'<b>⚡️Ваша анимация готова!</b>', parse_mode="HTML")
+                                      caption=f'<b>⚡️Ваша анимация готова!</b>', parse_mode="HTML", force_document=True)
             os.removedirs(f'work/work_ANI/{r}')
         elif file_format == "json":
             work_dir = Path(f'work/temp_downloads/{r}')
@@ -1911,7 +1911,7 @@ async def handle_document_processing(message: types.Message):
             await process_bpc_file(file_name, message, r, temp_dir)
         elif file_format == "txd":
             txd_converter = TXDConverter()
-            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
+            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
             try:
                 src_dir = Path(f'work/work_COL/{r}')
                 os.mkdir(src_dir)
@@ -1932,13 +1932,13 @@ async def handle_document_processing(message: types.Message):
                 bio = io.BytesIO(zip_buffer)
                 bio.name = f"{os.path.splitext(message.document.file_name)[0]}.zip"
                 await t_client.send_file(message.chat.id, bio, caption=f'<b>⚡️Ваши файлы готовы!</b>',
-                                          parse_mode="HTML")
+                                          parse_mode="HTML", force_document=True)
             except Exception as e:
                 logging.error(f"TXD processing error: {e}", exc_info=True)
             finally:
                 await y.delete()
         elif file_format == "mod":
-            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
+            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
             file_name = message.document.file_name
             file_name2 = file_name.split(".")[0]
             download_path = Path(f'work/work_MOD/{r}')
@@ -1950,7 +1950,7 @@ async def handle_document_processing(message: types.Message):
             await y.delete()
             await t_client.send_file(chat_id=message.chat.id,
                                       document=dff_file_path, caption=f'<b>⚡️Ваша модель готова!</b>',
-                                      parse_mode="HTML")
+                                      parse_mode="HTML", force_document=True)
 
         elif file_format in ["btx", "png", "jpg", "jpeg", "zip"]:
             y = await message.answer("В данный момент мы чиним и конверт BTX не работает")
@@ -1996,7 +1996,7 @@ async def handle_document_processing(message: types.Message):
 
                 caption = '<b>⚡️Ваши файлы готовы!</b>'
         elif file_format == "dat":
-            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
+            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
             try:
                 file_name = message.document.file_name
                 file_name2 = file_name.split(".")[0]
@@ -2006,7 +2006,7 @@ async def handle_document_processing(message: types.Message):
                 json_file_path = f'work/work_MOD/{r}/{file_name2}.json'
                 json = await convert_timecyc_dat_to_json(json_file_path, file_name, temp)
                 await t_client.send_file(message.chat.id, json_file_path,
-                                          caption=f'<b>⚡️Ваша модель готова!</b>', parse_mode="HTML")
+                                          caption=f'<b>⚡️Ваша модель готова!</b>', parse_mode="HTML", force_document=True)
             except Exception as e:
                 logging.error(f"TXD processing error: {e}", exc_info=True)
             finally:
@@ -2057,7 +2057,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud1.zip", "hud1")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>',
-                                  parse_mode="HTML")
+                                  parse_mode="HTML", force_document=True)
         await asyncio.to_thread(shutil.rmtree, work_dir)
 
     if '/hud2' in message.text.split():
@@ -2075,7 +2075,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud2.zip", "hud2")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>',
-                                  parse_mode="HTML")
+                                  parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/hud3' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2092,7 +2092,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud3.zip", "hud3")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>',
-                                  parse_mode="HTML")
+                                  parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/hud4' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2109,7 +2109,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud4.zip", "hud4")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>',
-                                  parse_mode="HTML")
+                                  parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/hp1' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2126,7 +2126,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp1.zip", "hp1")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/hp2' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2143,7 +2143,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp2.zip", "hp2")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/hp3' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2160,7 +2160,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp3.zip", "hp3")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/blood' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2177,7 +2177,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/blood.zip", "blood")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваша кровь готова!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваша кровь готова!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/tree' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2194,7 +2194,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/tree.zip", "tree")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/vctree' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2211,7 +2211,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/vctree.zip", "vctree")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp1' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2228,7 +2228,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp1.zip", "kp1")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp2' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2245,7 +2245,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp2.zip", "kp2")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp3' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2262,7 +2262,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp3.zip", "kp3")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp4' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2279,7 +2279,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp4.zip", "kp4")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp5' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2296,7 +2296,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp5.zip", "kp5")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp6' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2313,7 +2313,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp6.zip", "kp6")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp7' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2330,7 +2330,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp7.zip", "kp7")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp8' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2347,7 +2347,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp8.zip", "kp8")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/kp9' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2364,7 +2364,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp9.zip", "kp9")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/carmenu' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2381,7 +2381,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/carmenu.zip", "carmenu")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваше меню машины готово!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваше меню машины готово!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/speedometer' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2398,7 +2398,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/speedometer.zip", "speedometer")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваш спидометр готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваш спидометр готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/road' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2415,7 +2415,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/road.zip", "road")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Вари дороги готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Вари дороги готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/casino' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2432,7 +2432,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/casino.zip", "casino")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваш худ казино готов!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваш худ казино готов!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if '/pickup' in message.text.split():
         y = await message.answer("Обрабатываю...")
@@ -2449,7 +2449,7 @@ async def ok(message: types.Message):
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/pickup.zip", "pickup")
         await y.delete()
         await t_client.send_file(message.chat.id, output_zip_path,
-                                  caption='<b>⚡️Ваши пикапы готовы!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️Ваши пикапы готовы!</b>', parse_mode="HTML", force_document=True)
         shutil.rmtree(work_dir)
     if "/edit" in message.text:
         builder = InlineKeyboardBuilder()
@@ -2462,7 +2462,7 @@ async def ok(message: types.Message):
         output_file_path = await timecyc(j)
         await y.delete()
         await t_client.send_file(message.chat.id, output_file_path,
-                                  caption='<b>⚡️TimeCycle готов!</b>', parse_mode="HTML")
+                                  caption='<b>⚡️TimeCycle готов!</b>', parse_mode="HTML", force_document=True)
         if os.path.exists(output_file_path):
             os.remove(output_file_path)
     elif "/timecyc" in message.text and len(message.text.split()) < 5:
@@ -2489,7 +2489,7 @@ async def ok(message: types.Message):
         await y.delete()
         await t_client.send_file(message.chat.id, output_file_name,
                                   caption=f"<b>Держи weapon⚡</b>\nКоличество патрон в магазине: {PT}\nРазброс патрон: {RAZB}",
-                                  parse_mode="HTML")
+                                  parse_mode="HTML", force_document=True)
         os.remove(output_file_name)
     elif "/weapon" in message.text and len(message.text.split()) < 3:
         await message.answer(
@@ -2536,7 +2536,7 @@ async def ok(message: types.Message):
         user_id = message.from_user.id
         await y.delete()
         await t_client.send_file(chat_id=user_id, document=name, caption='⚡️<b>Держите погоду!</b>',
-                                  parse_mode="HTML")
+                                  parse_mode="HTML", force_document=True)
         os.remove(name)
     elif "/weather" in message.text and len(message.text.split()) < 2:
         await message.answer(
@@ -2615,16 +2615,16 @@ async def ok(message: types.Message):
         try:
             user_id = message.from_user.id
             await t_client.send_file(chat_id=user_id, document=f"skin/{message.text.split()[1]}.dff",
-                                      caption='⚡️<b>Держите cкин!</b>', parse_mode="HTML")
+                                      caption='⚡️<b>Держите cкин!</b>', parse_mode="HTML", force_document=True)
             await t_client.send_file(chat_id=user_id, document=f"texture/texture_{message.text.split()[1]}.zip",
-                                      caption='⚡️<b>Держите текстуры!</b>', parse_mode="HTML")
+                                      caption='⚡️<b>Держите текстуры!</b>', parse_mode="HTML", force_document=True)
         except:
             await message.answer("Такого названия нет")
     elif '/car' in message.text.split():
         try:
             user_id = message.from_user.id
             await t_client.send_file(chat_id=user_id, document=f"car/{message.text.split()[1]}.mod",
-                                      caption='⚡️<b>Держите машину!</b>', parse_mode="HTML")
+                                      caption='⚡️<b>Держите машину!</b>', parse_mode="HTML", force_document=True)
         except:
             await message.answer("Такого названия нет")
     elif "/help" in message.text:
@@ -2808,6 +2808,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
