@@ -8,3 +8,4 @@ zipfile36
 scipy
 pyrogram
 tgcrypto
+Telethon
