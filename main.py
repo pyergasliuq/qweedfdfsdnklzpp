@@ -2520,7 +2520,7 @@ async def ok(message: types.Message):
         image_path = await kvadratik(hex_color)
         user_id = message.from_user.id
         await y.delete()
-        t_client.send_photo(user_id, image_path, caption=f'🎨<b>Палитра цвета - {hex_color} </b>',parse_mode="HTML")
+        t_client.send_file(user_id, image_path, caption=f'🎨<b>Палитра цвета - {hex_color} </b>',parse_mode="HTML")
         os.remove(image_path)
     elif "/checkcolor" in message.text and len(message.text.split()) < 2:
         await message.answer(
@@ -2809,6 +2809,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
