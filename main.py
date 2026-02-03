@@ -32,7 +32,7 @@ from pyrogram import Client, enums
 
 API_ID = 27899860
 API_HASH = '3577d2ab68f0f9bfd7c3abf5db21a516'
-BOT_TOKEN = '7062207808:AAH6wIoxnsmjxeTRaOO9WXih4ZrGH9_JIeM'
+BOT_TOKEN = '7062207808:AAH31MyMonisJhDDZNZeH9yjFkwIhkDlW58'
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -2567,3 +2567,4 @@ async def main():
         await p_app.stop()
 if __name__ == "__main__":
     asyncio.run(main())
+
