@@ -2273,7 +2273,7 @@ async def ok(message: types.Message):
             grn1 = await colorcyc(r, g, b)
         user_id = message.from_user.id
         await y.delete()
-        await p_app.send_document(chat_id=user_id,document=grn1,caption='⚡️<b>Ваш colorcycle готов!</b>',parse_mode='HTML')
+        await bot.send_document(chat_id=user_id,document=grn1,caption='⚡️<b>Ваш colorcycle готов!</b>',parse_mode='HTML')
         os.remove(grn1)
     elif "/colorcyc" in message.text and len(message.text.split()) < 2:
         await message.answer("❔ Неверный формат данных. Используйте: /colorcyc <color>\n\nПример использования: /colorcyc 1.2 или /colorcyc #FF0000")
@@ -2561,5 +2561,6 @@ async def main():
         await p_app.stop()
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
