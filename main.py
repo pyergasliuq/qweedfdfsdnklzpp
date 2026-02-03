@@ -1394,7 +1394,7 @@ async def handle_document_processing(message: types.Message):
         src_dir = Path(f'work/work_COLOR/{r}')
         await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
         download_path = src_dir / file_name
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
+        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
         if file_format in ["jpeg", "jpg", "png"]:
             await p_app.download_media(message.document, file_name=download_path)
             processed_bytes = await asyncio.to_thread(_process_image_bytes, download_path, hex_color,
@@ -1402,6 +1402,7 @@ async def handle_document_processing(message: types.Message):
             bio = io.BytesIO(processed_bytes)
             bio.name = file_name
             bio.seek(0)
+            y.delete()
             await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
                                       parse_mode="HTML", force_document=True)
         elif file_format == "zip":
@@ -1424,7 +1425,7 @@ async def handle_document_processing(message: types.Message):
                                  "-➤ Фильтры:\n└ red — усиление красного канала\n└ green — усиление зеленого канала\n└ blue — усиление синего канала\n└ grayscale — применение эффекта чёрно - белой палитры\n└ negate — создание эффекта негатива\n└ sepia — добавление теплого сепийного тона\n└ solarize — эффект передержки изображения",
                                  parse_mode='Markdown')
             return
-        processing_message = await message.answer("Обрабатываю...")
+        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
         src_dir = Path(f'work/work_COLOR/{r}')
         await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
         download_path = src_dir / file_name
@@ -1435,7 +1436,7 @@ async def handle_document_processing(message: types.Message):
             bio = io.BytesIO(processed_bytes)
             bio.name = file_name
             bio.seek(0)
-            await processing_message.delete()
+            await y.delete()
             await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
                                       parse_mode="HTML", force_document=True)
         elif file_format == "zip":
@@ -1457,7 +1458,7 @@ async def handle_document_processing(message: types.Message):
             await message.answer("❔ Пример: `/recolor #ffbbbb #661717 30`", parse_mode='Markdown')
             return
         target_hex, replacement_hex, tolerance = recolor_params
-        processing_message = await message.answer("Обрабатываю перекраску...")
+        y = await message.answer(f"<b>⏳ Обрабатываю перекраску...</b>", parse_mode="HTML")
         try:
             if file_format in ["jpeg", "jpg", "png"]:
                 src_dir = Path(f'work/work_COLOR/{r}')
@@ -1494,7 +1495,7 @@ async def handle_document_processing(message: types.Message):
             await message.answer(f"Произошла непредвиденная ошибка: {e}")
         finally:
             try:
-                await processing_message.delete()
+                await y.delete()
             except Exception:
                 pass
     elif '/quality' in caption:
@@ -2808,6 +2809,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
