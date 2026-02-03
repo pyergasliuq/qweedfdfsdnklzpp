@@ -1401,6 +1401,7 @@ async def handle_document_processing(message: types.Message):
                                                       alpha)
             bio = io.BytesIO(processed_bytes)
             bio.name = file_name
+            bio.seek(0)
             await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
                                       parse_mode="HTML")
         elif file_format == "zip":
@@ -1433,6 +1434,7 @@ async def handle_document_processing(message: types.Message):
                                                       filter, colvo)
             bio = io.BytesIO(processed_bytes)
             bio.name = file_name
+            bio.seek(0)
             await processing_message.delete()
             await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
                                       parse_mode="HTML")
@@ -1467,6 +1469,7 @@ async def handle_document_processing(message: types.Message):
                 if processed_bytes:
                     bio = io.BytesIO(processed_bytes)
                     bio.name = file_name
+                    bio.seek(0)
                     await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
                                         parse_mode="HTML")
                 else:
@@ -1509,6 +1512,7 @@ async def handle_document_processing(message: types.Message):
                 processed_bytes = await asyncio.to_thread(quality_func, download_path, level)
                 bio = io.BytesIO(processed_bytes)
                 bio.name = file_name
+                bio.seek(0)
                 await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
                                           parse_mode="HTML")
 
@@ -2804,6 +2808,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
