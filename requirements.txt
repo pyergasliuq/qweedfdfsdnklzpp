@@ -6,3 +6,5 @@ matplotlib
 aiofiles
 zipfile36
 scipy
+pyrogram
+tgcrypto
