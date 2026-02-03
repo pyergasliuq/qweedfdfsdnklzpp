@@ -1401,8 +1401,7 @@ async def handle_document_processing(message: types.Message):
                                                       alpha)
             bio = io.BytesIO(processed_bytes)
             bio.name = file_name
-            bio.seek(0)
-            await t_client.send_file(message.chat.id, io.BytesIO(processed_bytes), caption='<b>⚡️Файл готов!</b>',
+            await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
                                       parse_mode="HTML")
         elif file_format == "zip":
             await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
@@ -2805,5 +2804,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
