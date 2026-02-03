@@ -2272,9 +2272,8 @@ async def ok(message: types.Message):
             r, g, b = (str(round(c / 100, 3)) for c in [r1, g1, b1])
             grn1 = await colorcyc(r, g, b)
         user_id = message.from_user.id
-        document = FSInputFile(grn1)
         await y.delete()
-        await p_app.send_document(chat_id=user_id,document=document,caption='⚡️<b>Ваш colorcycle готов!</b>',parse_mode='HTML')
+        await p_app.send_document(chat_id=user_id,document=grn1,caption='⚡️<b>Ваш colorcycle готов!</b>',parse_mode='HTML')
         os.remove(grn1)
     elif "/colorcyc" in message.text and len(message.text.split()) < 2:
         await message.answer("❔ Неверный формат данных. Используйте: /colorcyc <color>\n\nПример использования: /colorcyc 1.2 или /colorcyc #FF0000")
@@ -2297,10 +2296,9 @@ async def ok(message: types.Message):
         name = "mapzones.json"
         with open(name, 'w') as f:
             f.write(final_data)
-        document = FSInputFile(name)
         user_id = message.from_user.id
         await y.delete()
-        await p_app.send_document(chat_id=user_id, document=document, caption='⚡️<b>Держите погоду!</b>', parse_mode=enums.ParseMode.HTML)
+        await p_app.send_document(chat_id=user_id, document=name, caption='⚡️<b>Держите погоду!</b>', parse_mode=enums.ParseMode.HTML)
         os.remove(name)
     elif "/weather" in message.text and len(message.text.split()) < 2:
         await message.answer("❔ Неверный формат данных. Используйте: /weather <ID>\n\nПример использования: /weather 2\n\n⭐️ Список айди погоды:\n2 = дождь\n8 = гроза\n9 = густой туман и пасмурно\n10 = ясное небо\n11 = дикое пекло\n12 - 15 = смуглая и неприятная погода\n16 = тусклая и дождливая\n17 - 18 = жара\n19 = песчаная буря\n20 = туманная погода\n21 = ночь с пурпурным небом\n22 = ночь с зеленоватым небом\n23 - 26 = изменения бледного апельсина\n27 - 29 = изменения свежий синие\n30 - 32 = изменения темного, неясного, чирка\n33 = вечер в коричневатых оттенках\n34 = погода с синими/пурпурными оттенками\n35 = тусклая и унылая погода в коричневых тонах\n36 - 38 = яркая и туманная погода в тонах апельсина\n39 = очень яркая погода\n40 - 42 = неясная погода в пурпурных/синих цветах\n43 = тёмные и едкие облака\n44 = чёрно-белое небо\n45 = пурпурное небо")
@@ -2338,9 +2336,8 @@ async def ok(message: types.Message):
                     .replace("T11", time)
             with open(grn1_path, 'w') as outfile:
                 outfile.write(t)
-            document = FSInputFile(grn1_path)
             await y.delete()
-            await p_app.send_document(chat_id=user, document=document, caption='⚡️ Ваш particle.cfg готов!')
+            await p_app.send_document(chat_id=user, document=grn1_path, caption='⚡️ Ваш particle.cfg готов!')
         except (ValueError, IndexError) as e:
             await bot.send_message(user, f"Ошибка при обработке параметров цвета или команды: {e}")
         except Exception as e:
@@ -2377,17 +2374,14 @@ async def ok(message: types.Message):
     elif '/skin' in message.text.split():
         try:
             user_id = message.from_user.id
-            document = FSInputFile(f"skin/{message.text.split()[1]}.dff")
-            document2 = FSInputFile(f"texture/texture_{message.text.split()[1]}.zip")
-            await p_app.send_document(chat_id=user_id, document=document, caption='⚡️<b>Держите cкин!</b>', parse_mode=enums.ParseMode.HTML)
-            await p_app.send_document(chat_id=user_id, document=document2, caption='⚡️<b>Держите текстуры!</b>', parse_mode=enums.ParseMode.HTML)
+            await p_app.send_document(chat_id=user_id, document=f"skin/{message.text.split()[1]}.dff", caption='⚡️<b>Держите cкин!</b>', parse_mode=enums.ParseMode.HTML)
+            await p_app.send_document(chat_id=user_id, document=f"texture/texture_{message.text.split()[1]}.zip", caption='⚡️<b>Держите текстуры!</b>', parse_mode=enums.ParseMode.HTML)
         except:
             await message.answer("Такого названия нет")
     elif '/car' in message.text.split():
         try:
             user_id = message.from_user.id
-            document = FSInputFile(f"car/{message.text.split()[1]}.mod")
-            await p_app.send_document(chat_id=user_id, document=document, caption='⚡️<b>Держите машину!</b>', parse_mode=enums.ParseMode.HTML)
+            await p_app.send_document(chat_id=user_id, document=f"car/{message.text.split()[1]}.mod", caption='⚡️<b>Держите машину!</b>', parse_mode=enums.ParseMode.HTML)
         except:
             await message.answer("Такого названия нет")
     elif "/help" in message.text:
@@ -2567,4 +2561,5 @@ async def main():
         await p_app.stop()
 if __name__ == "__main__":
     asyncio.run(main())
+
 
