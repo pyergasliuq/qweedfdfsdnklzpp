@@ -498,7 +498,8 @@ async def handle_valid_files(message: types.Message, ):
 
 
 def rgb_to_hex(rgb):
-    return f'#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x}'
+    r, g, b = map(int, rgb)
+    return f'#{r:02x}{g:02x}{b:02x}'
 
 
 def process_json_file(filename):
@@ -506,32 +507,25 @@ def process_json_file(filename):
         with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except FileNotFoundError:
-        print(f"Ошибка: Файл '{filename}' не найден.")
-        return
+        return "Ошибка: Файл не найден."
     except json.JSONDecodeError:
-        print(f"Ошибка: Не удалось декодировать JSON из файла '{filename}'.")
-        return
-    colors_to_find = [
-        "SkyBottomRGB",
-        "SkyTopRGB",
-        "CloudRGB",
-        "SunCoreRGB"
-    ]
+        return "Ошибка: Неверный формат JSON."
+    if isinstance(data, list) and len(data) > 0:
+        content = data[0][0] if isinstance(data[0], list) else data[0]
+    else:
+        content = data
 
-    found_colors = {}
+    colors_to_find = ["SkyBottomRGB", "SkyTopRGB", "CloudRGB", "SunCoreRGB"]
+    result_string = ""
     for key in colors_to_find:
-        if key in data:
-            rgb_values = data[key]
+        if key in content:
+            rgb_values = content[key]
             if isinstance(rgb_values, list) and len(rgb_values) == 3:
                 hex_value = rgb_to_hex(rgb_values)
-                found_colors[key] = hex_value
-            else:
-                print(f"Предупреждение: Неверный формат данных для ключа '{key}'. Ожидается список из 3 чисел.")
-        else:
-            print(f"Предупреждение: Ключ '{key}' не найден в JSON файле.")
-    for key, hex_value in found_colors.items():
-        i = i + f"{key}: {hex_value}"
-    return i
+                result_string += f"{key}: {hex_value}\n"
+    
+    return result_string if result_string else "Ключи не найдены."
+
 
 
 def search_in_skins(query: str):
@@ -2837,6 +2831,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
