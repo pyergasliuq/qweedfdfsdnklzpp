@@ -2505,10 +2505,9 @@ async def ok(message: types.Message):
             r1, g1, b1 = ImageColor.getrgb(hex_color)
             r, g, b = (str(round(c / 100, 3)) for c in [r1, g1, b1])
             grn1 = await colorcyc(r, g, b)
-        user_id = message.from_user.id
-        f = FSInputFile(grn1)
+        user_id = message.from_user.i
         await y.delete()
-        await bot.send_document(chat_id=user_id, document=f, caption='⚡️<b>Ваш colorcycle готов!</b>',
+        await t_client.send_file(user_id, grn1, caption='⚡️<b>Ваш colorcycle готов!</b>',
                                 parse_mode='HTML')
         os.remove(grn1)
     elif "/colorcyc" in message.text and len(message.text.split()) < 2:
@@ -2628,6 +2627,30 @@ async def ok(message: types.Message):
                                       caption='⚡️<b>Держите машину!</b>', parse_mode="HTML", force_document=True)
         except:
             await message.answer("Такого названия нет")
+    elif "/merger" in message.text:
+        if len(message.text.split()) < 3:
+          await bot.answer("Неверный формат команды. Используйте: /merger <что копировать> <название текстуры(без .btx)\nВарианты копирования - tree, logo, bild")
+                return
+        y = await message.answer("Обрабатываю...")
+        clas = j[1]
+        name = j[2]
+        if clas == "tree" or "Tree" or "TREE":
+          suffix = Tree
+        elif clas == "logo" or "Logo" or "LOGO":
+          suffix = Tree
+        elif clas == "bild" or "Bild" or "BILD":
+          suffix = Tree
+        else:
+          await bot.answer("Неизвестный класс\nВарианты копирования - tree, logo, bild")
+                return
+        data = {
+          name: suffix
+        }
+        json_string = json.dumps(data, indent=4, ensure_ascii=False)
+        user_id = message.from_user.id
+        await y.delete()
+        await t_client.send_file(user_id, image_path, caption=f'🎨<b>Палитра цвета - {hex_color} </b>',parse_mode="HTML")
+        os.remove(image_path)
     elif "/help" in message.text:
         await message.answer("""<b>Привет👋 Вот возможности бота:</b>
 
@@ -2809,6 +2832,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
