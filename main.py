@@ -496,39 +496,28 @@ async def handle_valid_files(message: types.Message, ):
         except:
             pass
 
-
-import json
-
 def rgb_to_hex(rgb):
     return f'#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x}'
 
-def process_json_file(filename):
+def process_as_text(filename):
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            content = f.read()
     except FileNotFoundError:
-        return "Ошибка: Файл не найден."
-    except json.JSONDecodeError as e:
-        return f"Ошибка в формате JSON: {e}"
-    content = data
-    while isinstance(content, list) and len(content) > 0:
-        content = content[0]
-
-    if not isinstance(content, dict):
-        return "Ошибка: Не удалось найти объект с данными внутри JSON."
+        return "Файл не найден"
     colors_to_find = ["SkyBottomRGB", "SkyTopRGB", "CloudRGB", "SunCoreRGB"]
     results = []
     for key in colors_to_find:
-        if key in content:
-            rgb_values = content[key]
-            if isinstance(rgb_values, list) and len(rgb_values) >= 3:
-                hex_value = rgb_to_hex(rgb_values)
-                results.append(f"{key}: {hex_value}")
-            else:
-                results.append(f"{key}: Ошибка формата")
+        pattern = rf'"{key}"\s*:\s*\[\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*\]'
+        match = re.search(pattern, content)
+        if match:
+            hex_val = rgb_to_hex(match.groups())
+            results.append(f"{key}: {hex_val}")
         else:
-            results.append(f"{key}: Не найден")
+            results.append(f"{key}: Не найден или кривой формат")
+
     return "\n".join(results)
+
 
 def search_in_skins(query: str):
     results = []
@@ -538,7 +527,7 @@ def search_in_skins(query: str):
             current_name = None
 
             for line in file:
-                line = line.strip()
+                line = import re
                 if line.startswith("ID - "):
                     current_id = line[5:]
                 elif line.startswith("NAME - "):
@@ -2833,6 +2822,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
