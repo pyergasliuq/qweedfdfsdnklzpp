@@ -525,27 +525,27 @@ def search_in_skins(query: str):
         with open('Editing/skins.txt', 'r', encoding='utf-8') as file:
             current_id = None
             current_name = None
-
+            
             for line in file:
-                line = import re
+                line = line.strip()
                 if line.startswith("ID - "):
                     current_id = line[5:]
                 elif line.startswith("NAME - "):
                     current_name = line[7:]
-
+                    
                     if current_id and current_name:
                         if query == current_id:
                             return [(current_id, current_name)]
-
+                        
                         clean_query = query.lower().replace('.mod', '')
                         mod_name = current_name.lower().replace('.mod', '')
-
+                        
                         if clean_query in mod_name:
                             results.append((current_id, current_name))
-
+                        
                         current_id = None
                         current_name = None
-
+                    
     except Exception as e:
         print(f"Ошибка: {e}")
         return None
@@ -2822,6 +2822,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
