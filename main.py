@@ -1867,7 +1867,7 @@ async def handle_document_processing(message: types.Message):
                 y = await message.answer("Обрабатываю...")
                 i = await asyncio.get_running_loop().run_in_executor(None, process_json_file, src)
                 await y.delete()
-                await message.answer(i)
+                await message.answer(str(i))
             except Exception as e:
                 await message.answer(f"Произошла ошибка: {e}")
             finally:
@@ -2837,6 +2837,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
