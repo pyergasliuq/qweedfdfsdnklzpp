@@ -2637,9 +2637,9 @@ async def ok(message: types.Message):
         if clas == "tree" or "Tree" or "TREE":
           suffix = Tree
         elif clas == "logo" or "Logo" or "LOGO":
-          suffix = Tree
+          suffix = FILE_SUFFIXES
         elif clas == "bild" or "Bild" or "BILD":
-          suffix = Tree
+          suffix = bild
         else:
           await message.answer("Неизвестный класс\nВарианты копирования - tree, logo, bild")
           return
@@ -2835,4 +2835,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
