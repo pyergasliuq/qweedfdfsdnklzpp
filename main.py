@@ -2629,7 +2629,7 @@ async def ok(message: types.Message):
             await message.answer("Такого названия нет")
     elif "/merger" in message.text:
         if len(message.text.split()) < 3:
-          await bot.answer("Неверный формат команды. Используйте: /merger <что копировать> <название текстуры(без .btx)\nВарианты копирования - tree, logo, bild")
+          await message.answer("Неверный формат команды. Используйте: /merger <что копировать> <название текстуры(без .btx)\nВарианты копирования - tree, logo, bild")
           return
         y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
         clas = j[1]
@@ -2641,7 +2641,7 @@ async def ok(message: types.Message):
         elif clas == "bild" or "Bild" or "BILD":
           suffix = Tree
         else:
-          await bot.answer("Неизвестный класс\nВарианты копирования - tree, logo, bild")
+          await message.answer("Неизвестный класс\nВарианты копирования - tree, logo, bild")
           return
         data = {
           name: suffix
@@ -2835,3 +2835,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
