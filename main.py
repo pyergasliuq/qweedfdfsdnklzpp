@@ -2642,7 +2642,7 @@ async def ok(message: types.Message):
           suffix = Tree
         else:
           await bot.answer("Неизвестный класс\nВарианты копирования - tree, logo, bild")
-                return
+          return
         data = {
           name: suffix
         }
@@ -2835,6 +2835,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
