@@ -1867,9 +1867,8 @@ async def handle_document_processing(message: types.Message):
             await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
             download_path = src_dir / file_name
             await p_app.download_media(message.document, download_path)
-            file_name = message.document.file_name
             file_name2 = file_name.split(".")[0]
-            ani_file_path = f'work/work_COL/{r}/{file_name2}.ani'
+            ani_file_path = f'work/work_COL/{r}/{file_name2}.col'
             y = await message.answer("Обрабатываю...")
             with open(download_path, 'rb') as f_input, open(ani_file_path, 'wb') as f_output:
                 f_input.seek(4)
@@ -2822,6 +2821,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
