@@ -497,10 +497,10 @@ async def handle_valid_files(message: types.Message, ):
             pass
 
 
-def rgb_to_hex(rgb):
-    r, g, b = map(int, rgb)
-    return f'#{r:02x}{g:02x}{b:02x}'
+import json
 
+def rgb_to_hex(rgb):
+    return f'#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x}'
 
 def process_json_file(filename):
     try:
@@ -508,25 +508,27 @@ def process_json_file(filename):
             data = json.load(f)
     except FileNotFoundError:
         return "Ошибка: Файл не найден."
-    except json.JSONDecodeError:
-        return "Ошибка: Неверный формат JSON."
-    if isinstance(data, list) and len(data) > 0:
-        content = data[0][0] if isinstance(data[0], list) else data[0]
-    else:
-        content = data
+    except json.JSONDecodeError as e:
+        return f"Ошибка в формате JSON: {e}"
+    content = data
+    while isinstance(content, list) and len(content) > 0:
+        content = content[0]
 
+    if not isinstance(content, dict):
+        return "Ошибка: Не удалось найти объект с данными внутри JSON."
     colors_to_find = ["SkyBottomRGB", "SkyTopRGB", "CloudRGB", "SunCoreRGB"]
-    result_string = ""
+    results = []
     for key in colors_to_find:
         if key in content:
             rgb_values = content[key]
-            if isinstance(rgb_values, list) and len(rgb_values) == 3:
+            if isinstance(rgb_values, list) and len(rgb_values) >= 3:
                 hex_value = rgb_to_hex(rgb_values)
-                result_string += f"{key}: {hex_value}\n"
-    
-    return result_string if result_string else "Ключи не найдены."
-
-
+                results.append(f"{key}: {hex_value}")
+            else:
+                results.append(f"{key}: Ошибка формата")
+        else:
+            results.append(f"{key}: Не найден")
+    return "\n".join(results)
 
 def search_in_skins(query: str):
     results = []
@@ -2831,6 +2833,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
