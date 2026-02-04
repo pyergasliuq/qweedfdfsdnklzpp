@@ -2631,6 +2631,8 @@ async def ok(message: types.Message):
         if len(message.text.split()) < 3:
           await message.answer("Неверный формат команды. Используйте: /merger <что копировать> <название текстуры(без .btx)\nВарианты копирования - tree, logo, bild")
           return
+        letters = string.ascii_lowercase
+        r = ''.join(random.choice(letters) for i in range(length))
         y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
         clas = j[1]
         name = j[2]
@@ -2646,12 +2648,12 @@ async def ok(message: types.Message):
         data = {
           name: suffix
         }
-        with open('Merger.json', 'w', encoding='utf-8') as f:
+        with open(f'Merger_{r}.json', 'w', encoding='utf-8') as f:
           json.dump(data, f, indent=4, ensure_ascii=False)
         user_id = message.from_user.id
         await y.delete()
-        await t_client.send_file(user_id, 'Merger.json', caption=f'⚡<b>Ваш Merger.json </b>',parse_mode="HTML")
-        os.remove('Merger.json')
+        await t_client.send_file(user_id, f'Merger_{r}.json', caption=f'⚡<b>Ваш Merger.json </b>',parse_mode="HTML")
+        os.remove(f'Merger_{r}.json')
     elif "/help" in message.text:
         await message.answer("""<b>Привет👋 Вот возможности бота:</b>
 
@@ -2835,5 +2837,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
