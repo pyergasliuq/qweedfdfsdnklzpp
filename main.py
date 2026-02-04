@@ -499,7 +499,7 @@ async def handle_valid_files(message: types.Message, ):
 def rgb_to_hex(rgb):
     return f'#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x}'
 
-def process_as_text(filename):
+def process_json_file(filename):
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -2822,6 +2822,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
