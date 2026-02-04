@@ -2630,7 +2630,7 @@ async def ok(message: types.Message):
     elif "/merger" in message.text:
         if len(message.text.split()) < 3:
           await bot.answer("Неверный формат команды. Используйте: /merger <что копировать> <название текстуры(без .btx)\nВарианты копирования - tree, logo, bild")
-                return
+          return
         y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
         clas = j[1]
         name = j[2]
