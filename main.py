@@ -1762,9 +1762,9 @@ async def handle_document_processing(message: types.Message):
             download_path = src_dir / file_name
             await p_app.download_media(message.document, download_path)
             zip_buffer, count = await asyncio.to_thread(process_image_sync, download_path)
-            bio = io.BytesIO(zip_buffer)
-            bio.name = f"hudcut_{r}.zip"
-            await t_client.send_file(message.chat.id, bio,
+            zip_buffer.seek(0)
+            zip_buffer.name = f'{r}_hudcut.zip'
+            await t_client.send_file(message.chat.id, zip_buffer,
                                       caption=f'<b>⚡️Ваш нарезаный худ готов!</b>', parse_mode="HTML", force_document=True)
         except Exception as e:
             logging.exception("Ошибка hudcut")
@@ -2837,6 +2837,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
