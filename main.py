@@ -2634,14 +2634,14 @@ async def ok(message: types.Message):
         letters = string.ascii_lowercase
         r = ''.join(random.choice(letters) for i in range(length))
         y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
-        clas = j[1]
+        clas = j[1].lower()
         name = j[2]
-        if clas == "tree" or "Tree" or "TREE":
-          suffix = Tree
-        elif clas == "logo" or "Logo" or "LOGO":
-          suffix = FILE_SUFFIXES
-        elif clas == "bild" or "Bild" or "BILD":
-          suffix = bild
+        if clas == "tree":
+            suffix = Tree
+        elif clas == "logo":
+            suffix = FILE_SUFFIXES
+        elif clas == "bild":
+            suffix = bild
         else:
           await message.answer("Неизвестный класс\nВарианты копирования - tree, logo, bild")
           return
@@ -2659,7 +2659,7 @@ async def ok(message: types.Message):
 
 <b>📌 Основные команды:</b>
 /start — начать работу с ботом
-/mysub — показать информацию о подписке
+/mysub — eпоказать информацию о подписке
 /edit - Запуск фотошопа
 /help - Помощь
 
@@ -2837,6 +2837,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
