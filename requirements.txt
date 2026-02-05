@@ -9,3 +9,4 @@ scipy
 pyrogram
 tgcrypto
 Telethon
+google-generativeai
