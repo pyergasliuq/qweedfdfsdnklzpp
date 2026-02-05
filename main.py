@@ -2662,7 +2662,7 @@ async def ok(message: types.Message):
         await t_client.send_file(user_id, f'Merger_{r}.json', caption=f'⚡<b>Ваш Merger.json </b>',parse_mode="HTML")
         os.remove(f'Merger_{r}.json')
     elif "/aicolor" in message.text:
-        if len(.split()) < 2:
+        if len(message.text.split()) < 2:
           await message.answer(
             "❔ Неверный формат данных. Используйте: /aicolor <description>\n\nПример использования: /aicolor свет от луны")
           return
@@ -2857,6 +2857,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
