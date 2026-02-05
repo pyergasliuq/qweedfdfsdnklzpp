@@ -124,16 +124,13 @@ def get_hex_from_description(description):
     Описание: {description}
     """
     
-    try:
-        response = model.generate_content(prompt)
-        hex_code = response.text.strip()
-        if re.match(r'^#[A-Fa-f0-9]{6}$', hex_code):
+    
+    response = model.generate_content(prompt)
+    hex_code = response.text.strip()
+    if re.match(r'^#[A-Fa-f0-9]{6}$', hex_code):
             return hex_code
-        else:
+    else:
             return f"Не удалось определить цвет (получено: {hex_code})"
-            
-    except Exception as e:
-        return f"Ошибка при запросе: {e}"
 
 def convert_zip2nonerai(src_file, temp_dir):
     temp_dir1 = Path(temp_dir)
@@ -2858,6 +2855,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
