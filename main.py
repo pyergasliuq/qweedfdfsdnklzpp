@@ -30,6 +30,8 @@ from skimage.filters import threshold_otsu
 from scipy.ndimage import gaussian_filter
 from pyrogram import Client,enums
 from telethon import TelegramClient
+import google.generativeai as genai
+
 
 API_ID = 27899860
 API_HASH = '3577d2ab68f0f9bfd7c3abf5db21a516'
@@ -41,6 +43,7 @@ p_app = Client("pyro_download_session", api_id=API_ID, api_hash=API_HASH, bot_to
 t_client = TelegramClient("tele_upload_session", API_ID, API_HASH)
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
+genai.configure(api_key="AIzaSyAdn3aDkpqdAT0JYzOWVhDvLrJUf3GwoAc")
 boti = Bot(token="7079077190:AAFosQVHAePab0Ck4lkVue8vY0AqnISPmEI")
 NOT_HI_MESSAGE = "Здравствуйте! Чтобы использовать бота, вам необходимо оформить подписку @keedboy016"
 length = 4
@@ -111,6 +114,26 @@ bild = ['reclam65', 'reclam66', 'Billb_SanVice', 'BLBRD_3_889', 'reclam67', 'BLB
         'Billb_GTABer', 'reclam68', 'BLBRD_6_889', 'reclam62', 'Billb_GostownParadise', 'reclam63', 'Billb_YouAreHere',
         'bilb_sign2', 'Billb_GTAUnited', 'BLBRD_4_889', 'BLBRD_2_889']
 
+def get_hex_from_description(description):
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    prompt = f"""
+    Ты — эксперт по колористике. Твоя задача: перевести описание цвета в формат HEX.
+    Если это простой цвет (например, "синий"), дай его стандартный код.
+    Если это описание (например, "цвет полнолуния"), подбери наиболее подходящий художественный оттенок.
+    Отвечай ТОЛЬКО hex-кодом (например, #FFFFFF), без лишних слов.
+    Описание: {description}
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        hex_code = response.text.strip()
+        if re.match(r'^#[A-Fa-f0-9]{6}$', hex_code):
+            return hex_code
+        else:
+            return f"Не удалось определить цвет (получено: {hex_code})"
+            
+    except Exception as e:
+        return f"Ошибка при запросе: {e}"
 
 def convert_zip2nonerai(src_file, temp_dir):
     temp_dir1 = Path(temp_dir)
@@ -2638,6 +2661,18 @@ async def ok(message: types.Message):
         await y.delete()
         await t_client.send_file(user_id, f'Merger_{r}.json', caption=f'⚡<b>Ваш Merger.json </b>',parse_mode="HTML")
         os.remove(f'Merger_{r}.json')
+    elif "/aicolor" in message.text:
+        if len(message.text.split()) < 2:
+          await message.answer(
+            "❔ Неверный формат данных. Используйте: /aicolor <description>\n\nПример использования: /aicolor свет от луны")
+          return
+        description = j
+        description = description.replace("/aicolor ", "").strip()
+        hex_color = get_hex_from_description(description)
+        image_path = await kvadratik(hex_color)
+        user_id = message.from_user.id
+        await t_client.send_file(user_id, image_path, caption=f'🎨<b>Hex цвет - {hex_color} </b>',parse_mode="HTML")
+        os.remove(image_path)
     elif "/help" in message.text:
         await message.answer("""<b>Привет👋 Вот возможности бота:</b>
 
@@ -2821,6 +2856,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
