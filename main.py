@@ -2662,11 +2662,11 @@ async def ok(message: types.Message):
         await t_client.send_file(user_id, f'Merger_{r}.json', caption=f'⚡<b>Ваш Merger.json </b>',parse_mode="HTML")
         os.remove(f'Merger_{r}.json')
     elif "/aicolor" in message.text:
-        if len(message.text.split()) < 2:
+        if len(.split()) < 2:
           await message.answer(
             "❔ Неверный формат данных. Используйте: /aicolor <description>\n\nПример использования: /aicolor свет от луны")
           return
-        description = j
+        description = str(message.text)
         description = description.replace("/aicolor ", "").strip()
         hex_color = get_hex_from_description(description)
         image_path = await kvadratik(hex_color)
@@ -2726,7 +2726,6 @@ async def ok(message: types.Message):
 /weapon - Создание weapon.dat
 /timecyc - сгенерировать оптимизированный TimeCycle
 /colorcyc - сгенерировать ColorCycle
-/merger - сгенерировать Merger
 /particle - создание кастом крови
 /genrl - создание кастом звуков бр
 /bpc - шифровка bpc
@@ -2736,6 +2735,7 @@ async def ok(message: types.Message):
 /logo - Копирование Логотипов
 /bild - Копирование Билбордов
 /tree - Копирование Листвы
+/merger - сгенерировать Merger
 
 <b>✂️ Нарезка:</b>
 /hudcut - Нарезка hud
@@ -2745,6 +2745,7 @@ async def ok(message: types.Message):
 
 <b>🌐 Дополнительно :</b>
 /checkcolor - Палитра цвета
+/aicolor - Цвет по описанию
 /aim - Конвертация Прицела
 /weather - Создание Погоды
 /compress - Сжатие веса
@@ -2856,6 +2857,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
