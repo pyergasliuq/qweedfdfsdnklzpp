@@ -2876,7 +2876,7 @@ bpc
 
 async def main():
     await setup_work_dirs()
-    init_db()
+    await init_db()
     await p_app.start()
     await t_client.start(bot_token=BOT_TOKEN)
 
@@ -2888,6 +2888,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
