@@ -2702,8 +2702,7 @@ async def ok(message: types.Message):
         description = str(message.text)
         description = description.replace("/aicolor ", "").strip()
         hex_color = get_hex_from_description(description)
-        h = "#FFFFFF"
-        image_path = await kvadratik(h)
+        image_path = await kvadratik(hex_color)
         user_id = message.from_user.id
         await t_client.send_file(user_id, image_path, caption=f'🎨<b>Hex цвет - {hex_color} </b>',parse_mode="HTML")
         os.remove(image_path)
@@ -2892,6 +2891,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
