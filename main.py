@@ -142,17 +142,16 @@ def get_hex_from_description(description):
     try:
         completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "Ты эксперт по цветам. Отвечай ТОЛЬКО HEX-кодом."},
-                {"role": "user", "content": desc_clean}
+                {"role": "system", "content": "Ты эксперт по колористике. Отвечай ТОЛЬКО hex-кодом (например, #FFFFFF), без лишних слов."},
+                {"role": "user", "content": f"Цвет: {desc_clean}"}
             ],
             model="llama-3.1-8b-instant", 
-            temperature=0,
+            temperature=0.1,
         )
-        hex_response = completion.choices.message.content.strip()
+        hex_response = completion.choices[0].message.content.strip()
         match = re.search(r'#[A-Fa-f0-9]{6}', hex_response)
         if match:
             final_hex = match.group(0).upper()
-            
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
                 cursor.execute("INSERT OR IGNORE INTO color_map (description, hex_code) VALUES (?, ?)", 
@@ -160,7 +159,7 @@ def get_hex_from_description(description):
                 conn.commit()
             return final_hex
         else:
-            return f"Ошибка формата: {hex_response}"
+            return f"Не удалось распознать формат: {hex_response}"
     except Exception as e:
         return f"Ошибка API: {str(e)}"
     
@@ -2889,6 +2888,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
