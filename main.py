@@ -30,13 +30,15 @@ from skimage.filters import threshold_otsu
 from scipy.ndimage import gaussian_filter
 from pyrogram import Client,enums
 from telethon import TelegramClient
-import google.generativeai as genai
-
+from groq import Groq
 
 API_ID = 27899860
 API_HASH = '3577d2ab68f0f9bfd7c3abf5db21a516'
 BOT_TOKEN = '7062207808:AAHf0JObSZt0fSSa-VHhwJ0xMPpJBe6WeE8'
 
+GROQ_API_KEY = "ВАШ_GROQ_API_KEY"
+client = Groq(api_key=GROQ_API_KEY)
+DB_PATH = 'infinite_colors.db'
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 p_app = Client("pyro_download_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -114,7 +116,58 @@ bild = ['reclam65', 'reclam66', 'Billb_SanVice', 'BLBRD_3_889', 'reclam67', 'BLB
         'Billb_GTABer', 'reclam68', 'BLBRD_6_889', 'reclam62', 'Billb_GostownParadise', 'reclam63', 'Billb_YouAreHere',
         'bilb_sign2', 'Billb_GTAUnited', 'BLBRD_4_889', 'BLBRD_2_889']
 
-  
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS color_map (
+                description TEXT PRIMARY KEY, 
+                hex_code TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_description ON color_map(description)')
+        conn.commit()
+
+def get_hex_from_description(description):
+    desc_clean = description.strip().lower()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT hex_code FROM color_map WHERE description = ?", (desc_clean,))
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+    except Exception as e:
+        print(f"Ошибка БД: {e}")
+    try:
+        completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "Ты эксперт по цветам. Отвечай ТОЛЬКО HEX-кодом."},
+                {"role": "user", "content": desc_clean}
+            ],
+            model="llama3-8b-8192",
+            temperature=0,
+        )
+
+        hex_response = completion.choices[0].message.content.strip()
+        match = re.search(r'#[A-Fa-f0-9]{6}', hex_response)
+        
+        if match:
+            final_hex = match.group(0).upper()
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("INSERT OR IGNORE INTO color_map (description, hex_code) VALUES (?, ?)", 
+                               (desc_clean, final_hex))
+                conn.commit()
+            
+            return final_hex
+        else:
+            return f"Ошибка формата: {hex_response}"
+
+    except Exception as e:
+        return f"Ошибка API: {str(e)}"
+    
 def get_hex_from_description(description):
     model = genai.GenerativeModel('gemini-2.5-flash')
     prompt = f"""
@@ -2845,6 +2898,7 @@ bpc
 
 async def main():
     await setup_work_dirs()
+    init_db()
     await p_app.start()
     await t_client.start(bot_token=BOT_TOKEN)
 
@@ -2856,6 +2910,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
