@@ -36,7 +36,7 @@ API_ID = 27899860
 API_HASH = '3577d2ab68f0f9bfd7c3abf5db21a516'
 BOT_TOKEN = '7062207808:AAHf0JObSZt0fSSa-VHhwJ0xMPpJBe6WeE8'
 
-GROQ_API_KEY = "ВАШ_GROQ_API_KEY"
+GROQ_API_KEY = "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"
 client = Groq(api_key=GROQ_API_KEY)
 DB_PATH = 'infinite_colors.db'
 bot = Bot(token=BOT_TOKEN)
@@ -2910,6 +2910,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
