@@ -136,7 +136,7 @@ def get_hex_from_description(description):
             cursor.execute("SELECT hex_code FROM color_map WHERE description = ?", (desc_clean,))
             result = cursor.fetchone()
             if result:
-                return result[0]
+                return result[0] 
     except Exception as e:
         print(f"Ошибка БД: {e}")
     try:
@@ -145,25 +145,22 @@ def get_hex_from_description(description):
                 {"role": "system", "content": "Ты эксперт по цветам. Отвечай ТОЛЬКО HEX-кодом."},
                 {"role": "user", "content": desc_clean}
             ],
-            model="llama3-8b-8192",
+            model="llama-3.1-8b-instant", 
             temperature=0,
         )
-
-        hex_response = completion.choices[0].message.content.strip()
+        hex_response = completion.choices.message.content.strip()
         match = re.search(r'#[A-Fa-f0-9]{6}', hex_response)
-        
         if match:
             final_hex = match.group(0).upper()
+            
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
                 cursor.execute("INSERT OR IGNORE INTO color_map (description, hex_code) VALUES (?, ?)", 
                                (desc_clean, final_hex))
                 conn.commit()
-            
             return final_hex
         else:
             return f"Ошибка формата: {hex_response}"
-
     except Exception as e:
         return f"Ошибка API: {str(e)}"
     
@@ -2892,6 +2889,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
