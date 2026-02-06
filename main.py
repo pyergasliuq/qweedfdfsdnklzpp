@@ -2702,7 +2702,7 @@ async def ok(message: types.Message):
           return
         description = str(message.text)
         description = description.replace("/aicolor ", "").strip()
-        hex_color = get_hex_from_description(description):
+        hex_color = get_hex_from_description(description)
         h = "#FFFFFF"
         image_path = await kvadratik(h)
         user_id = message.from_user.id
@@ -2893,6 +2893,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
