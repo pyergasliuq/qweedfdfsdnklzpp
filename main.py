@@ -45,7 +45,6 @@ p_app = Client("pyro_download_session", api_id=API_ID, api_hash=API_HASH, bot_to
 t_client = TelegramClient("tele_upload_session", API_ID, API_HASH)
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
-genai.configure(api_key="AIzaSyADFetsGapxXxHMNvoTHtoSQZF9D2mfoxI")
 boti = Bot(token="7079077190:AAFosQVHAePab0Ck4lkVue8vY0AqnISPmEI")
 NOT_HI_MESSAGE = "Здравствуйте! Чтобы использовать бота, вам необходимо оформить подписку @keedboy016"
 length = 4
@@ -2893,6 +2892,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
