@@ -168,23 +168,6 @@ def get_hex_from_description(description):
     except Exception as e:
         return f"Ошибка API: {str(e)}"
     
-def get_hex_from_description(description):
-    model = genai.GenerativeModel('gemini-2.5-flash')
-    prompt = f"""
-    Ты — эксперт по колористике. Твоя задача: перевести описание цвета в формат HEX.
-    Если это простой цвет (например, "синий"), дай его стандартный код.
-    Если это описание (например, "цвет полнолуния"), подбери наиболее подходящий художественный оттенок.
-    Отвечай ТОЛЬКО hex-кодом (например, #FFFFFF), без лишних слов.
-    Описание: {description}
-    """
-    
-    
-    response = model.generate_content(prompt)
-    hex_code = response.text.strip()
-    if re.match(r'^#[A-Fa-f0-9]{6}$', hex_code):
-            return hex_code
-    else:
-            return f"Не удалось определить цвет (получено: {hex_code})"
 
 def convert_zip2nonerai(src_file, temp_dir):
     temp_dir1 = Path(temp_dir)
@@ -2719,7 +2702,7 @@ async def ok(message: types.Message):
           return
         description = str(message.text)
         description = description.replace("/aicolor ", "").strip()
-        hex_color = get_hex_from_description(description)
+        hex_color = get_hex_from_description(description):
         h = "#FFFFFF"
         image_path = await kvadratik(h)
         user_id = message.from_user.id
@@ -2910,6 +2893,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
