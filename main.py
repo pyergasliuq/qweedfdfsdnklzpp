@@ -7,7 +7,7 @@ import datetime
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import string
 import random
-from PIL import ImageColor, Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter, ImageOps
+from PIL import ImageColor, Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter, ImageOps, ImageChops
 from aiogram.types import FSInputFile, BufferedInputFile
 import zipfile
 from pathlib import Path
@@ -33,6 +33,9 @@ from telethon import TelegramClient
 from groq import Groq
 import colorsys
 from sklearn.cluster import KMeans
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
 API_ID = 27899860
 API_HASH = '3577d2ab68f0f9bfd7c3abf5db21a516'
@@ -41,7 +44,7 @@ BOT_TOKEN = '7062207808:AAHf0JObSZt0fSSa-VHhwJ0xMPpJBe6WeE8'
 GROQ_API_KEY = "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"
 client = Groq(api_key=GROQ_API_KEY)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 p_app = Client("pyro_download_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 t_client = TelegramClient("tele_upload_session", API_ID, API_HASH)
 logging.basicConfig(level=logging.INFO)
@@ -117,6 +120,73 @@ bild = ['reclam65', 'reclam66', 'Billb_SanVice', 'BLBRD_3_889', 'reclam67', 'BLB
         'bilb_sign2', 'Billb_GTAUnited', 'BLBRD_4_889', 'BLBRD_2_889']
 
 
+class OverlayStates(StatesGroup):
+    waiting_for_second_image = State()
+
+def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
+    base = Image.open(base_input).convert("RGBA")
+    overlay = Image.open(overlay_input).convert("RGBA")
+
+    # Подгоняем overlay под размер базы
+    overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
+
+    # --- ЛОГИКА РЕЖИМОВ ---
+    if mode == "multiply":  # Наложение на БЕЛОЕ (затемнение)
+        effect = ImageChops.multiply(base, overlay)
+    elif mode == "screen":  # Наложение на ЧЕРНОЕ (осветление)
+        # Делаем эффект сильнее через двойное наложение
+        effect = ImageChops.screen(base, overlay)
+        effect = ImageChops.screen(effect, overlay)
+    elif mode == "overlay":  # Смешанный режим (контрастный)
+        effect = ImageChops.overlay(base, overlay)
+        effect = ImageChops.overlay(effect, overlay)
+    elif mode == "add":  # Экстремальное осветление
+        effect = ImageChops.add(base, overlay)
+    elif mode == "darker":  # Оставляет только самые темные пиксели
+        effect = ImageChops.darker(base, overlay)
+    else:
+        effect = overlay
+    base_alpha = base.split()[3]
+    user_alpha_level = int(255 * (alpha_pct / 100.0))
+    mask = ImageChops.darker(base_alpha, Image.new("L", base.size, user_alpha_level))
+    final = Image.composite(effect, base, mask)
+    img_byte_arr = io.BytesIO()
+    is_png = getattr(base, 'format', '').upper() == 'PNG'
+    if is_png:
+        final.save(img_byte_arr, format='PNG')
+    else:
+        final.convert("RGBA").save(img_byte_arr, format='PNG')
+    return img_byte_arr.getvalue()
+
+
+def _process_zip_overlay(zip_path, overlay_img_path, mode, alpha_pct):
+    import zipfile
+    output_zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_path, 'r') as archive_in:
+        with zipfile.ZipFile(output_zip_buffer, 'a', zipfile.ZIP_DEFLATED) as archive_out:
+            for file_info in archive_in.infolist():
+                # Игнорируем папки и скрытые файлы MacOS/Windows
+                if file_info.is_dir() or file_info.filename.startswith('__MACOSX') or \
+                        not file_info.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    continue
+
+                with archive_in.open(file_info) as file:
+                    try:
+                        # Читаем изображение из архива
+                        img_bytes = io.BytesIO(file.read())
+
+                        # Применяем наложение (используем нашу функцию _process_overlay_logic)
+                        processed_bytes = _process_overlay_logic(img_bytes, overlay_img_path, mode, alpha_pct)
+
+                        # Сохраняем в новый ZIP под тем же именем
+                        archive_out.writestr(file_info.filename, processed_bytes)
+                    except Exception as e:
+                        print(f"Ошибка при обработке файла {file_info.filename}: {e}")
+                        continue
+
+    output_zip_buffer.seek(0)
+    return output_zip_buffer
 
 async def create_palette_image(image_path, file_name, n_colors=10, output_file="palette.png"):
     img = Image.open(image_path).convert('RGB')
@@ -950,7 +1020,7 @@ def _process_image_bytes(image_bytes, color_hex, alpha):
         logging.warning(f"Invalid hex color: {color_hex}. Using default white.")
         new_color_np = np.array([1.0, 1.0, 1.0], dtype=np.float32)
     try:
-        img = Image.open(image_bytes)
+        img = Image.open(io.BytesIO(image_bytes))
         if img.mode != 'RGBA':
             img = img.convert('RGBA')
         img_np = np.array(img, dtype=np.float32) / 255.0
@@ -970,7 +1040,7 @@ def _process_image_bytes(image_bytes, color_hex, alpha):
         return None
 
 
-async def color_optimized(color_hex, src_zip_path: Path, original_zip_name: str, alpha=1.0):
+async def color_optimized(color_hex, src_zip_path, original_zip_name: str, alpha=1.0):
     r = generate_random_string(4)
     files_to_process = []
     with zipfile.ZipFile(src_zip_path, 'r') as src_zip:
@@ -978,24 +1048,18 @@ async def color_optimized(color_hex, src_zip_path: Path, original_zip_name: str,
             if not zip_info.is_dir() and zip_info.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
                 files_to_process.append((zip_info.filename, src_zip.read(zip_info.filename)))
     loop = asyncio.get_running_loop()
-    tasks = []
     with ThreadPoolExecutor() as executor:
-        for filename, image_bytes in files_to_process:
-            task = loop.run_in_executor(
-                executor,
-                _process_image_bytes,
-                image_bytes,
-                color_hex,
-                alpha
-            )
-            tasks.append((filename, task))
+        tasks = [
+            loop.run_in_executor(executor, _process_image_bytes, img, color, alpha)
+            for filename, img in files_to_process
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         processed_files_info = []
-        for filename, task in tasks:
-            result_bytes = await task
-            if result_bytes is not None:
-                processed_files_info.append((result_bytes, filename))
-            else:
-                logging.warning(f"Skipping file {filename} due to processing error.")
+        for (filename, _), res in zip(files_to_process, results):
+            if isinstance(res, Exception) or res is None:
+                logging.warning(f"Ошибка в файле {filename}: {res}")
+                continue
+            processed_files_info.append((res, filename))
     output_zip_dir = Path(f'work/work_HUD/{r}')
     work_dir = Path(f'work/work_HUD/{r}')
     await asyncio.to_thread(os.makedirs, output_zip_dir, exist_ok=True)
@@ -1020,7 +1084,7 @@ async def setup_work_dirs():
                  'work/work_LOGO/', 'work/work_TREE/', 'work/work_COLOR/',
                  'work/work_BTX/', 'work/work_TXD/', 'work/work_BPC/',
                  'work/work_HUD/', 'work/work_ANI/', 'work/work_COMPRESS', 'work/work_COL', 'work/work_MOD',
-                 'work/work_Z2N']
+                 'work/work_Z2N', "work/work_OVERLAY"]
     for d in work_dirs:
         os.makedirs(d, exist_ok=True)
 
@@ -1417,7 +1481,7 @@ def _process_zip_sync(download_path: Path, output_zip_path: Path, target_size: t
 
 
 @dp.message(F.document)
-async def handle_document_processing(message: types.Message):
+async def handle_document_processing(message: types.Message, state: FSMContext):
     letters = string.ascii_lowercase
     r = ''.join(random.choice(letters) for i in range(length))
     user_id = message.from_user.id
@@ -1426,6 +1490,7 @@ async def handle_document_processing(message: types.Message):
     file_name = message.document.file_name
     file_format = file_name.split('.')[1]
     sub, message_to_send = await update(user_id, username)
+    current_state = await state.get_state()
     if sub:
         await message.answer(message_to_send)
         return
@@ -1474,10 +1539,11 @@ async def handle_document_processing(message: types.Message):
             await asyncio.to_thread(shutil.rmtree, src_dir)
     elif '/filters' in caption:
         filter, colvo = parse_filter(caption)
-        if not filter:
-            await message.answer("❔ Пример использования: `/filters red`\n"
-                                 "-➤ Фильтры:\n└ red — усиление красного канала\n└ green — усиление зеленого канала\n└ blue — усиление синего канала\n└ grayscale — применение эффекта чёрно - белой палитры\n└ negate — создание эффекта негатива\n└ sepia — добавление теплого сепийного тона\n└ solarize — эффект передержки изображения",
+        if len(message.caption.split()) < 3:
+            await message.answer(
+                "❔ Неверный формат данных. Используйте: /filters <filter> <col>\n\nПример использования: `/filters red` или `/filters light 100`\n\n-➤ Фильтры:\n└ red — усиление красного канала\n└ green — усиление зеленого канала\n└ blue — усиление синего канала\n└ grayscale — применение эффекта чёрно - белой палитры\n└ negate — создание эффекта негатива\n└ sepia — добавление теплого сепийного тона\n└ solarize — эффект передержки изображения└ light - яркось регулируемая\n└ saturation - насыщеность регулируемая\n└ contrast - контраст регулируемый\n└ clarity - четкость регулируемая",
                                  parse_mode='Markdown')
+            return
             return
         y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
         src_dir = Path(f'work/work_COLOR/{r}')
@@ -1896,6 +1962,65 @@ async def handle_document_processing(message: types.Message):
         await t_client.send_file(chat_id, f'work/work_COLOR/{r}/palette.png', caption=f'<b>⚡️{o}</b>',
                                  parse_mode="HTML")
         shutil.rmtree(work_dir)
+    elif '/overlay' in caption:
+        if len(message.caption.split()) < 3:
+            await message.answer(
+                "❔ Неверный формат данных. Используйте: /overlay <mode> <alpha>\n\nПример использования: /overlay overlay 16\n\nРабочие моды:\n└ multiply -  Наложение на БЕЛОЕ (затемнение)\n└ screen - Наложение на ЧЕРНОЕ (осветление)\n└ overlay -  Смешанный режим (контрастный)\n└ add - Экстремальное осветление\n└ darker -  Оставляет только самые темные пиксели")
+            return
+        parts = caption.split()
+        mode = parts[1] if len(parts) > 1 else "normal"
+        alpha = int(parts[2]) if len(parts) > 2 else 100
+        if file_format not in ["jpeg", "jpg", "png", "zip"]:
+            return await message.answer("❌ Поддерживаются только изображения или архив!")
+        src_dir = Path(f'work/work_OVERLAY/{r}')
+        os.makedirs(src_dir, exist_ok=True)
+        download_path = src_dir / file_name
+        await p_app.download_media(message.document, file_name=str(download_path))
+        await state.update_data(
+            base_path=str(download_path),
+            mode=mode,
+            alpha=alpha,
+            original_name=file_name
+        )
+        await state.set_state(OverlayStates.waiting_for_second_image)
+        await message.answer(
+            f"<b>✅ Первый файл получен!</b>\nРежим: <code>{mode}</code>\nПрозрачность: <code>{alpha}%</code>\n\nТеперь пришли <b>второй файл</b> (документом) для наложения.",
+            parse_mode="HTML")
+        return
+    if current_state == OverlayStates.waiting_for_second_image:
+        second_ext = file_name.split('.')[-1].lower()
+        second_path = Path(f"work/work_OVERLAY/temp_overlay_{r}.{second_ext}")
+        data = await state.get_data()
+        y = await message.answer(f"<b>⏳ Начинаю обработку...</b>", parse_mode="HTML")
+        second_ext = file_name.split('.')[-1].lower()
+        second_path = Path(f"work/work_OVERLAY/overlay_src_{r}.{second_ext}")
+        await p_app.download_media(message.document, file_name=str(second_path))
+        if data['original_name'].lower().endswith('.zip'):
+            result_buffer = await asyncio.to_thread(
+                _process_zip_overlay,
+                data['base_path'],
+                str(second_path),
+                data['mode'],
+                data['alpha']
+            )
+            out_filename = f"processed_{r}.zip"
+        else:
+            processed_bytes = await asyncio.to_thread(
+                _process_overlay_logic,
+                data['base_path'],
+                str(second_path),
+                data['mode'],
+                data['alpha']
+            )
+            result_buffer = io.BytesIO(processed_bytes)
+            out_filename = f"result_{data['original_name']}"
+        result_buffer.name = out_filename
+        result_buffer.seek(0)
+        await t_client.send_file(message.chat.id, result_buffer, caption='<b>⚡️ Готово!</b>', parse_mode="HTML",
+                                 force_document=True)
+        await y.delete()
+        await state.clear()
+        return
     else:
         if file_format == "ifp":
             for id in loging_id:
@@ -2751,9 +2876,14 @@ async def ok(message: types.Message):
 /edit - Запуск фотошопа
 /help - Помощь
 
-<b>🎨 Перекраска изображений:</b>
+<b>🎨 Работа с цветом:</b>
 /color - Покраска Изображений
 /recolor - Перекраска цвета
+/checkcolor - Палитра цвета
+/aicolor - Цвет по описанию
+/randcolor - Случайный приятный цвет
+/overlay - Наложение изображения
+/filters - Фильтры и настройка изображения
 /hud1 - Перекраска белого hud
 /hud2 - Перекраска полупрозрачного hud
 /hud3 - Перекраска оригинального hud
@@ -2778,18 +2908,6 @@ async def ok(message: types.Message):
 /road - Перекраска дорог
 /casino - Перекраска Казино
 /pickup - Перекраска пикапов
-/filters
-└ red - усиление красного канала
-└ green - усиление зеленого канала
-└ blue - усиление синего канала
-└ grayscale - применение эффекта чёрно - белой палитры
-└ negate - создание эффекта негатива
-└ sepia - добавление теплого сепийного тона
-└ solarize - эффект передержки изображения
-└ light - яркось регулируемая
-└ saturation - насыщеность регулируемая
-└ contrast - контраст регулируемый
-└ clarity - четкость регулируемая
 
 <b>📂 Создание файлов:</b>
 /weapon - Создание weapon.dat
@@ -2813,9 +2931,6 @@ async def ok(message: types.Message):
 /rehud - Восстановить hud
 
 <b>🌐 Дополнительно :</b>
-/checkcolor - Палитра цвета
-/aicolor - Цвет по описанию
-/randcolor - Случайный приятный цвет
 /ptk - пипетка изображения
 /aim - Конвертация Прицела
 /weather - Создание Погоды
