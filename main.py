@@ -42,9 +42,9 @@ load_dotenv()
 
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-token2 = os.getenv("GROQ_API_KEY")
+token2 = os.getenv("token2")
 client = Groq(api_key=GROQ_API_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -3047,5 +3047,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
