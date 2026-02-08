@@ -11,3 +11,4 @@ tgcrypto
 Telethon
 groq
 scikit-learn
+python-dotenv
