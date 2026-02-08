@@ -36,12 +36,15 @@ from sklearn.cluster import KMeans
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from dotenv import load_dotenv
 
-API_ID = 27899860
-API_HASH = '3577d2ab68f0f9bfd7c3abf5db21a516'
-BOT_TOKEN = '7062207808:AAHf0JObSZt0fSSa-VHhwJ0xMPpJBe6WeE8'
+load_dotenv()
 
-GROQ_API_KEY = "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"
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("API_ID")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+token2 = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -49,7 +52,7 @@ p_app = Client("pyro_download_session", api_id=API_ID, api_hash=API_HASH, bot_to
 t_client = TelegramClient("tele_upload_session", API_ID, API_HASH)
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
-boti = Bot(token="7079077190:AAFosQVHAePab0Ck4lkVue8vY0AqnISPmEI")
+boti = Bot(token=token2)
 NOT_HI_MESSAGE = "Здравствуйте! Чтобы использовать бота, вам необходимо оформить подписку @keedboy016"
 length = 4
 DB_PATH = 'users.db'
@@ -3044,3 +3047,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
