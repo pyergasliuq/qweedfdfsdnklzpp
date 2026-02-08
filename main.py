@@ -1050,7 +1050,7 @@ async def color_optimized(color_hex, src_zip_path, original_zip_name: str, alpha
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor() as executor:
         tasks = [
-            loop.run_in_executor(executor, _process_image_bytes, img, color, alpha)
+            loop.run_in_executor(executor, _process_image_bytes, img, color_hex, alpha)
             for filename, img in files_to_process
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
