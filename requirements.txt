@@ -12,3 +12,5 @@ Telethon
 groq
 scikit-learn
 python-dotenv
+python-telegram-bot>=20.7
+imagecodecs>=2024.1.1
