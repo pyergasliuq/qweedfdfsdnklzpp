@@ -3223,6 +3223,7 @@ async def ok(message: types.Message):
 /weather - Создание Погоды
 /compress - Сжатие веса
 /search - Получить название из ID и наоборот(cкин)
+/btx - настройка сжатия
 
 <b>📁 Автоматически:</b>
 <i><b>файл.btx/.png/.jpg/.zip</b></i> - обработка BTX,PNG,JPG
