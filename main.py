@@ -38,7 +38,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
-from btx_converter import image_to_btx, btx_to_image, ensure_astcenc
+from btx_converter import image_to_btx, btx_to_image
 
 load_dotenv()
 
