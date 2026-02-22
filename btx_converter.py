@@ -1,23 +1,3 @@
-"""
-BTX <-> Image converter
-
-BTX format: 4-byte magic \x02\x00\x00\x00 + KTX1 data (ASTC compressed texture)
-
-Encoding (image → BTX):
-  1. Load → RGBA
-  2. Premultiply alpha + bleed transparent areas
-  3. Pad to power-of-2
-  4. Generate mipmap chain
-  5. Encode each mip with astcenc → raw ASTC blocks
-  6. Assemble KTX1 container
-  7. Prepend BTX magic header
-
-Decoding (BTX → image):
-  1. Strip 4-byte BTX header → KTX1
-  2. Parse KTX1 (format, size, mip0 data)
-  3. Decode mip0 with astcenc → PNG
-"""
-
 import os
 import io
 import math
@@ -31,21 +11,12 @@ import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Optional, List, Tuple
-
 import numpy as np
 from PIL import Image
-
 logger = logging.getLogger(__name__)
-
-# ─────────────────────────────────────────────────────────
-# Constants
-# ─────────────────────────────────────────────────────────
-
 BTX_MAGIC = b'\x02\x00\x00\x00'
 KTX1_MAGIC = b'\xabKTX 11\xbb\r\n\x1a\n'
 ASTC_RAW_MAGIC = 0x5CA1AB13
-
-# OpenGL ASTC sRGB internal formats (KHR_texture_compression_astc_hdr)
 ASTC_GL_FORMAT: dict = {
     (4,  4):  0x93D0,
     (5,  4):  0x93D1,
@@ -70,15 +41,8 @@ QUALITY_FLAGS = {
     "thorough":   "-thorough",
     "exhaustive": "-exhaustive",
 }
-
-# ─────────────────────────────────────────────────────────
-# astcenc binary management  (no root, no shell needed)
-# ─────────────────────────────────────────────────────────
-
 ASTCENC_VERSION = "4.7.0"
 ASTCENC_RELEASES = "https://github.com/ARM-software/astc-encoder/releases/download"
-
-
 def _astcenc_dir() -> Path:
     """Find a writable directory for the binary."""
     candidates = [
@@ -96,8 +60,6 @@ def _astcenc_dir() -> Path:
         except OSError:
             continue
     raise RuntimeError("No writable directory found for astcenc")
-
-
 def _astcenc_candidates() -> List[str]:
     d = _astcenc_dir()
     return [
@@ -108,8 +70,6 @@ def _astcenc_candidates() -> List[str]:
         "astcenc-avx2",
         "astcenc",
     ]
-
-
 def find_astcenc() -> Optional[str]:
     for c in _astcenc_candidates():
         if shutil.which(c):
@@ -167,12 +127,6 @@ def download_astcenc() -> str:
 def ensure_astcenc() -> str:
     b = find_astcenc()
     return b if b else download_astcenc()
-
-
-# ─────────────────────────────────────────────────────────
-# Image processing helpers
-# ─────────────────────────────────────────────────────────
-
 def _premultiply_alpha(img: Image.Image) -> Image.Image:
     arr = np.array(img, dtype=np.float32)
     a = arr[:, :, 3:4] / 255.0
@@ -216,11 +170,6 @@ def _gen_mipmaps(img: Image.Image) -> List[Image.Image]:
         mips.append(img.resize((w, h), Image.LANCZOS))
     return mips
 
-
-# ─────────────────────────────────────────────────────────
-# Raw .astc container
-# ─────────────────────────────────────────────────────────
-
 def _make_astc_file(data: bytes, w: int, h: int, bw: int, bh: int) -> bytes:
     hdr = struct.pack("<I", ASTC_RAW_MAGIC)
     hdr += bytes([bw, bh, 1])
@@ -228,11 +177,6 @@ def _make_astc_file(data: bytes, w: int, h: int, bw: int, bh: int) -> bytes:
     hdr += struct.pack("<I", h)[:3]
     hdr += b"\x01\x00\x00"
     return hdr + data
-
-
-# ─────────────────────────────────────────────────────────
-# KTX1 container
-# ─────────────────────────────────────────────────────────
 
 def _parse_ktx1(data: bytes) -> dict:
     if not data.startswith(KTX1_MAGIC):
@@ -272,11 +216,6 @@ def _make_ktx1(mips: List[bytes], w: int, h: int, bw: int, bh: int) -> bytes:
         out += struct.pack("<I", len(mip)) + mip + b"\x00" * (pad - len(mip))
     return out
 
-
-# ─────────────────────────────────────────────────────────
-# astcenc wrappers
-# ─────────────────────────────────────────────────────────
-
 def _astcenc_encode(png: str, astc: str, block: str, quality: str, bin: str):
     flag = QUALITY_FLAGS.get(quality, "-medium")
     r = subprocess.run([bin, "-cl", png, astc, block, flag],
@@ -290,11 +229,6 @@ def _astcenc_decode(astc: str, png: str, block: str, bin: str):
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"astcenc decode failed:\n{r.stdout}\n{r.stderr}")
-
-
-# ─────────────────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────────────────
 
 def image_to_btx(
     image_path: str,
@@ -326,7 +260,7 @@ def image_to_btx(
             mip.save(mip_png, "PNG")
             _astcenc_encode(mip_png, mip_astc, compress_mode, quality_mode, astcenc_bin)
             with open(mip_astc, "rb") as f:
-                compressed.append(f.read()[16:])  # strip 16-byte .astc header
+                compressed.append(f.read()[16:])
 
         ktx = _make_ktx1(compressed, orig_w, orig_h, bw, bh)
         os.makedirs(os.path.dirname(btx_path) or ".", exist_ok=True)
