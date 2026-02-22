@@ -3080,13 +3080,12 @@ bpc
             await message.answer("У вас нет прав администратора для выполнения этой команды.")
 
     elif "/kotek" in message.text:
-        await update(message.chat.id, message.from_user.username)  # Убеждаемся, что админ в БД
+        await update(message.chat.id, message.from_user.username) 
         sender_id = message.from_user.id
 
         admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (sender_id,), fetchone=True)
 
         if admin_status_row and admin_status_row[0] == 'True':
-            # Получаем список всех chat_id из базы данных
             all_users = execute_sql_query("SELECT chat_id FROM users", fetchall=True)
 
             message_to_send = message.text.replace("/rass", "").strip()
@@ -3095,9 +3094,7 @@ bpc
                 for user_row in all_users:
                     user_id = user_row[0]
                     try:
-                        # Асинхронная отправка сообщения
                         await bot.send_message(user_id, message_to_send)
-                        # Можно добавить небольшую задержку, чтобы Telegram не забанил за спам
                         await asyncio.sleep(0.1)
                     except Exception as e:
                         print(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
@@ -3132,8 +3129,6 @@ async def main():
     await setup_work_dirs()
     await p_app.start()
     await t_client.start(bot_token=BOT_TOKEN)
-
-    # Регистрируем middleware логирования для всех входящих апдейтов
     dp.update.middleware(LoggingMiddleware())
 
     try:
@@ -3145,6 +3140,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
