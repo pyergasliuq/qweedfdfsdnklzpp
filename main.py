@@ -23,10 +23,6 @@ from txd import TXDConverter
 import re
 from shutil import rmtree
 import struct
-import ctypes
-import ctypes.util
-import tempfile
-from typing import Optional
 from skimage.measure import label, regionprops
 from skimage.morphology import disk, closing, opening
 from skimage import exposure
@@ -54,41 +50,7 @@ t_client = TelegramClient("tele_upload_session", API_ID, API_HASH)
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
 boti = Bot(token=os.getenv("token2"))
-NOT_HI_MESSAGE = "Здравствуйте! Чтобы использовать бота, вам необходимо оформить подписку @keedboy016"
-
-
-async def send_log(message: types.Message, content_type: str = "текст", extra: str = ""):
-    try:
-        user = message.from_user
-        now  = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        uid  = user.id
-        uname = f"@{user.username}" if user.username else "нет юзернейма"
-        fname = user.first_name or ""
-        lname = user.last_name or ""
-        full_name = f"{fname} {lname}".strip()
-        caption = message.caption or ""
-
-        header = (
-            f"📋 <b>Лог активности</b>\n"
-            f"📅 Дата: <code>{now}</code>\n"
-            f"👤 Имя: <b>{full_name}</b>\n"
-            f"🆔 ID: <code>{uid}</code>\n"
-            f"🔗 Username: {uname}\n"
-            f"📁 Тип: <b>{content_type}</b>\n"
-        )
-        if extra:
-            header += f"ℹ️ Доп. инфо: {extra}\n"
-        if caption:
-            header += f"💬 Подпись: {caption}\n"
-
-        for chat_id in loging_id:
-            await boti.send_message(chat_id, header, parse_mode="HTML")
-            try:
-                await message.forward(chat_id)
-            except Exception:
-                pass
-    except Exception as e:
-        logging.warning(f"send_log error: {e}")
+NOT_HI_MESSAGE = "Здравствуйте! Чтобы использовать бота, вам необходимо оформить подписку(платную) @keedboy016"
 length = 4
 DB_PATH = 'users.db'
 FILE_SUFFIXES = ['logobrkrasnodar', 'logobrkaliningrad', 'logobrbelgorod', 'logobrizhevsk', 'logobrgray',
@@ -161,26 +123,96 @@ bild = ['reclam65', 'reclam66', 'Billb_SanVice', 'BLBRD_3_889', 'reclam67', 'BLB
 class OverlayStates(StatesGroup):
     waiting_for_second_image = State()
 
+async def send_log(message: types.Message, content_type: str = "текст", extra: str = ""):
+    try:
+        user      = message.from_user
+        now       = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        uid       = user.id
+        uname     = f"@{user.username}" if user.username else "нет юзернейма"
+        full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        caption   = message.caption or ""
+
+        type_icons = {
+            "текст": "💬", "фото": "🖼", "стикер": "🎭", "гифка": "🎞",
+            "видео": "🎬", "голосовое": "🎤", "аудио": "🎵", "файл": "📁",
+            "видео-сообщение": "📹", "контакт": "👤", "геолокация": "📍",
+            "опрос": "📊", "история": "📖",
+        }
+        icon = type_icons.get(content_type, "📋")
+
+        lines = [
+            f"{icon} <b>Лог: {content_type}</b>",
+            f"📅 <code>{now}</code>",
+            f"👤 <b>{full_name}</b>  {uname}",
+            f"🆔 <code>{uid}</code>",
+        ]
+
+        if message.chat.type != "private":
+            lines.append(f"💬 Чат: <code>{message.chat.id}</code> ({message.chat.title or ''})")
+
+        if extra:
+            lines.append(f"ℹ️ {extra}")
+        if caption:
+            lines.append(f"💬 Подпись: {caption}")
+
+        if message.sticker:
+            s = message.sticker
+            lines.append(f"😄 Emoji: {s.emoji or '—'}  |  Набор: {s.set_name or '—'}")
+        elif message.document:
+            d = message.document
+            size_kb = round(d.file_size / 1024, 1) if d.file_size else "?"
+            lines.append(f"📄 Файл: <code>{d.file_name}</code>  ({size_kb} КБ)")
+        elif message.photo:
+            p = message.photo[-1]
+            lines.append(f"📐 Размер: {p.width}×{p.height}  |  {round(p.file_size/1024,1)} КБ")
+        elif message.video:
+            v = message.video
+            lines.append(f"⏱ Длит.: {v.duration}с  |  {v.width}×{v.height}  |  {round(v.file_size/1024/1024,2)} МБ")
+        elif message.animation:
+            a = message.animation
+            lines.append(f"⏱ Длит.: {a.duration}с  |  {a.width}×{a.height}")
+        elif message.voice:
+            lines.append(f"⏱ Длит.: {message.voice.duration}с")
+        elif message.audio:
+            au = message.audio
+            lines.append(f"🎵 {au.performer or '—'} — {au.title or '—'}  |  {au.duration}с")
+        elif message.video_note:
+            lines.append(f"⏱ Длит.: {message.video_note.duration}с")
+        elif message.contact:
+            c = message.contact
+            lines.append(f"📞 {c.first_name} {c.last_name or ''}  |  {c.phone_number}")
+        elif message.location:
+            loc = message.location
+            lines.append(f"🗺 lat={loc.latitude}  lon={loc.longitude}")
+        elif message.text:
+            preview = message.text[:200] + ("…" if len(message.text) > 200 else "")
+            lines.append(f"✉️ {preview}")
+
+        text = "\n".join(lines)
+        for chat_id in loging_id:
+            await boti.send_message(chat_id, text, parse_mode="HTML")
+            try:
+                await message.forward(chat_id)
+            except Exception:
+                pass
+    except Exception as e:
+        logging.warning(f"send_log error: {e}")
+
 def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
     base = Image.open(base_input).convert("RGBA")
     overlay = Image.open(overlay_input).convert("RGBA")
-
-    # Подгоняем overlay под размер базы
     overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
-
-    # --- ЛОГИКА РЕЖИМОВ ---
-    if mode == "multiply":  # Наложение на БЕЛОЕ (затемнение)
+    if mode == "multiply":
         effect = ImageChops.multiply(base, overlay)
-    elif mode == "screen":  # Наложение на ЧЕРНОЕ (осветление)
-        # Делаем эффект сильнее через двойное наложение
+    elif mode == "screen":
         effect = ImageChops.screen(base, overlay)
         effect = ImageChops.screen(effect, overlay)
-    elif mode == "overlay":  # Смешанный режим (контрастный)
+    elif mode == "overlay":
         effect = ImageChops.overlay(base, overlay)
         effect = ImageChops.overlay(effect, overlay)
-    elif mode == "add":  # Экстремальное осветление
+    elif mode == "add":
         effect = ImageChops.add(base, overlay)
-    elif mode == "darker":  # Оставляет только самые темные пиксели
+    elif mode == "darker":
         effect = ImageChops.darker(base, overlay)
     else:
         effect = overlay
@@ -204,20 +236,14 @@ def _process_zip_overlay(zip_path, overlay_img_path, mode, alpha_pct):
     with zipfile.ZipFile(zip_path, 'r') as archive_in:
         with zipfile.ZipFile(output_zip_buffer, 'a', zipfile.ZIP_DEFLATED) as archive_out:
             for file_info in archive_in.infolist():
-                # Игнорируем папки и скрытые файлы MacOS/Windows
                 if file_info.is_dir() or file_info.filename.startswith('__MACOSX') or \
                         not file_info.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                     continue
 
                 with archive_in.open(file_info) as file:
                     try:
-                        # Читаем изображение из архива
                         img_bytes = io.BytesIO(file.read())
-
-                        # Применяем наложение (используем нашу функцию _process_overlay_logic)
                         processed_bytes = _process_overlay_logic(img_bytes, overlay_img_path, mode, alpha_pct)
-
-                        # Сохраняем в новый ZIP под тем же именем
                         archive_out.writestr(file_info.filename, processed_bytes)
                     except Exception as e:
                         print(f"Ошибка при обработке файла {file_info.filename}: {e}")
@@ -524,245 +550,103 @@ async def safe_delete(file_path: Path, max_attempts=3):
             await asyncio.sleep(0.5 * (attempt + 1))
     return False
 
-_PVRTLCS_Linear = 0
-_PVRTLCS_sRGB   = 1
 
-_PVRTLVT_UnsignedByteNorm = 0
-
-_PVRTLRM_Linear = 1
-
-_PVRTLCQ_ASTCFast       = 1
-_PVRTLCQ_ASTCMedium     = 2
-_PVRTLCQ_ASTCThorough   = 3
-
-_PVRTLPF_ASTC_4x4 = 27
-_PVRTLPF_ASTC_6x6 = 31
-_PVRTLPF_ASTC_8x8 = 34
-
-_ASTC_FORMAT_MAP = {
-    "4x4": _PVRTLPF_ASTC_4x4,
-    "6x6": _PVRTLPF_ASTC_6x6,
-    "8x8": _PVRTLPF_ASTC_8x8,
-}
-
-_QUALITY_MAP = {
-    "fast":       _PVRTLCQ_ASTCFast,
-    "medium":     _PVRTLCQ_ASTCMedium,
-    "thorough":   _PVRTLCQ_ASTCThorough,
-}
-
-BTX_MAGIC = b'\x02\x00\x00\x00'
+def _btx_internal_format(block_w: int, block_h: int) -> int:
+    return {
+        (4, 4): 0x93B0, (5, 5): 0x93B2, (6, 6): 0x93B4,
+        (8, 5): 0x93B5, (8, 6): 0x93B6, (8, 8): 0x93B7,
+        (10,10): 0x93BB, (12,12): 0x93BD,
+    }[(block_w, block_h)]
 
 
-class _TranscoderOptions(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [
-        ("sizeofStruct", ctypes.c_uint32),
-        ("pixelFormat",  ctypes.c_uint64),
-        ("channelType",  ctypes.c_int * 4),
-        ("colourspace",  ctypes.c_int),
-        ("quality",      ctypes.c_int),
-        ("doDither",     ctypes.c_bool),
-        ("maxRange",     ctypes.c_float),
-        ("maxThreads",   ctypes.c_uint32),
-    ]
+def _compress_to_btx_bytes(img: Image.Image, block_w: int = 8, block_h: int = 8) -> bytes:
+    from astc_encoder import ASTCConfig, ASTCContext, ASTCImage, ASTCProfile, ASTCSwizzle, ASTCType
+    img = img.convert("RGBA")
+    w, h = img.size
+    cfg  = ASTCConfig(ASTCProfile.LDR, block_w, block_h, 1, 60.0)
+    ctx  = ASTCContext(cfg)
+    aimg = ASTCImage(ASTCType.U8, w, h, data=img.tobytes())
+    comp = ctx.compress(aimg, ASTCSwizzle.from_str("RGBA"))
+
+    ktx_id = bytes([0xAB,0x4B,0x54,0x58,0x20,0x31,0x31,0xBB,0x0D,0x0A,0x1A,0x0A])
+    hdr = struct.pack("<13I",
+        0x04030201, 0, 1, 0,
+        _btx_internal_format(block_w, block_h),
+        0x1908, w, h, 0, 0, 1, 1, 0)
+    return b'\x02\x00\x00\x00' + ktx_id + hdr + struct.pack("<I", len(comp)) + comp
 
 
-def _btx_find_pvrtexlib() -> Optional[str]:
-    here = Path(__file__).parent
-    for name in ("libPVRTexLib.so", "PVRTexLib.so", "libPVRTexLib.so.1"):
-        p = here / name
-        if p.exists():
-            return str(p)
-    try:
-        import importlib.util as ilu
-        spec = ilu.find_spec("PVRTexLib")
-        if spec and spec.origin:
-            pkg = Path(spec.origin).parent
-            for name in ("libPVRTexLib.so", "PVRTexLib.so", "_PVRTexLib.so", "libPVRTexLib.so.1"):
-                for d in (pkg, pkg.parent):
-                    p = d / name
-                    if p.exists():
-                        return str(p)
-    except Exception:
-        pass
-    candidates = []
-    for name in ("PVRTexLib", "libPVRTexLib"):
-        found = ctypes.util.find_library(name)
-        if found:
-            candidates.append(found)
-    for d in ("/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/opt/PVRTexTool/Library/Linux_x86_64"):
-        for name in ("libPVRTexLib.so", "libPVRTexLib.so.1"):
-            candidates.append(os.path.join(d, name))
-    for p in candidates:
-        if p and Path(p).exists():
-            return p
-    return None
-
-
-def _btx_bind_lib(lib: ctypes.CDLL) -> None:
-    lib.PVRTexLib_CreateTextureFromFile.argtypes = [ctypes.c_char_p]
-    lib.PVRTexLib_CreateTextureFromFile.restype  = ctypes.c_void_p
-    lib.PVRTexLib_DestroyTexture.argtypes = [ctypes.c_void_p]
-    lib.PVRTexLib_DestroyTexture.restype  = None
-    lib.PVRTexLib_SaveTextureToFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-    lib.PVRTexLib_SaveTextureToFile.restype  = ctypes.c_bool
-    lib.PVRTexLib_SaveSurfaceToImageFile.argtypes = [
-        ctypes.c_void_p, ctypes.c_char_p,
-        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
-    ]
-    lib.PVRTexLib_SaveSurfaceToImageFile.restype = ctypes.c_bool
-    lib.PVRTexLib_GetTextureHeaderW.argtypes = [ctypes.c_void_p]
-    lib.PVRTexLib_GetTextureHeaderW.restype  = ctypes.c_void_p
-    lib.PVRTexLib_SetTextureColourSpace.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    lib.PVRTexLib_SetTextureColourSpace.restype  = None
-    lib.PVRTexLib_PreMultiplyAlpha.argtypes = [ctypes.c_void_p]
-    lib.PVRTexLib_PreMultiplyAlpha.restype  = ctypes.c_bool
-    lib.PVRTexLib_Bleed.argtypes = [ctypes.c_void_p]
-    lib.PVRTexLib_Bleed.restype  = ctypes.c_bool
-    lib.PVRTexLib_GenerateMIPMaps.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int32]
-    lib.PVRTexLib_GenerateMIPMaps.restype  = ctypes.c_bool
-    lib.PVRTexLib_TranscodeTexture.argtypes = [ctypes.c_void_p, ctypes.POINTER(_TranscoderOptions)]
-    lib.PVRTexLib_TranscodeTexture.restype  = ctypes.c_bool
-    lib.PVRTexLib_Decompress.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.PVRTexLib_Decompress.restype  = ctypes.c_bool
-
-
-_pvr_lib: Optional[ctypes.CDLL] = None
-
-
-def _btx_get_lib() -> ctypes.CDLL:
-    global _pvr_lib
-    if _pvr_lib is None:
-        path = _btx_find_pvrtexlib()
-        if path is None:
-            raise RuntimeError("libPVRTexLib.so не найдена! Установи: pip install PVRTexLib")
-        logging.info(f"PVRTexLib загружена: {path}")
-        _pvr_lib = ctypes.CDLL(path)
-        _btx_bind_lib(_pvr_lib)
-    return _pvr_lib
-
-
-class _BtxTex:
-    def __init__(self, handle: int, lib: ctypes.CDLL):
-        if not handle:
-            raise RuntimeError("PVRTexLib вернул NULL — не удалось загрузить файл")
-        self._h = handle
-        self._lib = lib
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        if self._h:
-            self._lib.PVRTexLib_DestroyTexture(ctypes.c_void_p(self._h))
-            self._h = 0
-
-    @property
-    def p(self) -> ctypes.c_void_p:
-        return ctypes.c_void_p(self._h)
-
-
-def _image_to_btx_sync(image_path: str, btx_path: str, compress_mode: str = "4x4", quality_mode: str = "medium") -> None:
-    lib = _btx_get_lib()
-    px_fmt  = _ASTC_FORMAT_MAP.get(compress_mode, _PVRTLPF_ASTC_4x4)
-    quality = _QUALITY_MAP.get(quality_mode, _PVRTLCQ_ASTCMedium)
-    with tempfile.TemporaryDirectory(prefix="btxconv_") as tmp:
-        tmp = Path(tmp)
-        src = Path(image_path)
-        if src.suffix.lower() == ".png":
-            png_in = str(src)
-        else:
-            png_in = str(tmp / "src.png")
-            Image.open(image_path).convert("RGBA").save(png_in, "PNG")
-        handle = lib.PVRTexLib_CreateTextureFromFile(png_in.encode())
-        with _BtxTex(handle, lib) as tex:
-            if not lib.PVRTexLib_PreMultiplyAlpha(tex.p):
-                raise RuntimeError("PreMultiplyAlpha failed")
-            if not lib.PVRTexLib_Bleed(tex.p):
-                raise RuntimeError("Bleed failed")
-            if not lib.PVRTexLib_GenerateMIPMaps(tex.p, _PVRTLRM_Linear, -1):
-                raise RuntimeError("GenerateMIPMaps failed")
-            opts = _TranscoderOptions()
-            opts.sizeofStruct = ctypes.sizeof(_TranscoderOptions)
-            opts.pixelFormat  = px_fmt
-            for i in range(4):
-                opts.channelType[i] = _PVRTLVT_UnsignedByteNorm
-            opts.colourspace  = _PVRTLCS_sRGB
-            opts.quality      = quality
-            opts.doDither     = False
-            opts.maxRange     = 1.0
-            opts.maxThreads   = 0
-            if not lib.PVRTexLib_TranscodeTexture(tex.p, ctypes.pointer(opts)):
-                raise RuntimeError(f"TranscodeTexture failed (mode={compress_mode}, quality={quality_mode})")
-            ktx_path = str(tmp / "out.ktx")
-            if not lib.PVRTexLib_SaveTextureToFile(tex.p, ktx_path.encode()):
-                raise RuntimeError("SaveTextureToFile failed")
-        ktx_data = Path(ktx_path).read_bytes()
-        os.makedirs(os.path.dirname(btx_path) or ".", exist_ok=True)
-        Path(btx_path).write_bytes(BTX_MAGIC + ktx_data)
-
-
-def _btx_to_image_sync(btx_path: str, output_path: str) -> str:
-    lib = _btx_get_lib()
-    raw = Path(btx_path).read_bytes()
-    if raw[:4] != BTX_MAGIC:
-        raise ValueError(f"Невалидный BTX файл (magic={raw[:4].hex()})")
-    with tempfile.TemporaryDirectory(prefix="btxconv_") as tmp:
-        tmp = Path(tmp)
-        ktx_path = str(tmp / "in.ktx")
-        Path(ktx_path).write_bytes(raw[4:])
-        handle = lib.PVRTexLib_CreateTextureFromFile(ktx_path.encode())
-        with _BtxTex(handle, lib) as tex:
-            hdr = lib.PVRTexLib_GetTextureHeaderW(tex.p)
-            if hdr:
-                lib.PVRTexLib_SetTextureColourSpace(ctypes.c_void_p(hdr), _PVRTLCS_sRGB)
-            if not lib.PVRTexLib_Decompress(tex.p, 0):
-                raise RuntimeError("Decompress failed")
-            out = Path(output_path)
-            os.makedirs(str(out.parent) if str(out.parent) != "." else ".", exist_ok=True)
-            pvr_native = {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".hdr"}
-            if out.suffix.lower() in pvr_native:
-                if not lib.PVRTexLib_SaveSurfaceToImageFile(tex.p, str(out).encode(), 0, 0, 0, 0):
-                    raise RuntimeError("SaveSurfaceToImageFile failed")
-            else:
-                tmp_png = str(tmp / "decoded.png")
-                if not lib.PVRTexLib_SaveSurfaceToImageFile(tex.p, tmp_png.encode(), 0, 0, 0, 0):
-                    raise RuntimeError("SaveSurfaceToImageFile failed")
-                Image.open(tmp_png).save(str(out))
-    return output_path
+def _decompress_from_btx_bytes(data: bytes) -> Image.Image:
+    from astc_encoder import ASTCConfig, ASTCContext, ASTCImage, ASTCProfile, ASTCSwizzle, ASTCType
+    FORMAT_MAP = {v: k for k, v in {
+        (4,4):0x93B0,(5,5):0x93B2,(6,6):0x93B4,
+        (8,5):0x93B5,(8,6):0x93B6,(8,8):0x93B7,
+        (10,10):0x93BB,(12,12):0x93BD,
+    }.items()}
+    offset = 4 + 12
+    hdr = struct.unpack_from("<13I", data, offset)
+    gl_fmt, w, h = hdr[4], hdr[6], hdr[7]
+    block_w, block_h = FORMAT_MAP[gl_fmt]
+    comp = data[offset + 52 + 4:]
+    cfg  = ASTCConfig(ASTCProfile.LDR, block_w, block_h, 1, 60.0)
+    ctx  = ASTCContext(cfg)
+    aimg = ASTCImage(ASTCType.U8, w, h)
+    ctx.decompress(comp, aimg, ASTCSwizzle.from_str("RGBA"))
+    return Image.frombytes("RGBA", (w, h), bytes(aimg.data))
 
 
 async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
     try:
-        await asyncio.to_thread(_image_to_btx_sync, str(input_path), str(temp_ktx))
+        loop = asyncio.get_event_loop()
+        img  = await loop.run_in_executor(None, Image.open, str(input_path))
+        btx  = await loop.run_in_executor(None, _compress_to_btx_bytes, img)
+        async with aiofiles.open(str(temp_ktx), "wb") as f:
+            await f.write(btx)
         return True
     except Exception as e:
-        logging.error(f"convert_png_to_btx_pvr error: {e}")
+        logging.error(f"convert_png_to_btx_pvr: {e}")
         return False
 
 
-async def convert_png_to_btx(input_path, original_filename: str, temp_dir):
-    stem = Path(original_filename).stem
-    out_path = Path(temp_dir) / f"{stem}.btx"
-    await asyncio.to_thread(_image_to_btx_sync, str(input_path), str(out_path))
-    return str(out_path)
+async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir):
+    try:
+        loop     = asyncio.get_event_loop()
+        img      = await loop.run_in_executor(None, Image.open, str(input_path))
+        btx      = await loop.run_in_executor(None, _compress_to_btx_bytes, img)
+        out_name = Path(temp_dir) / (Path(original_filename).stem + ".btx")
+        async with aiofiles.open(str(out_name), "wb") as f:
+            await f.write(btx)
+        return out_name
+    except Exception as e:
+        logging.error(f"convert_png_to_btx: {e}")
+        return None
 
 
 async def convert_btx_to_png_pvr(temp_ktx, output_path):
     try:
-        await asyncio.to_thread(_btx_to_image_sync, str(temp_ktx), str(output_path))
+        async with aiofiles.open(str(temp_ktx), "rb") as f:
+            data = await f.read()
+        loop = asyncio.get_event_loop()
+        img  = await loop.run_in_executor(None, _decompress_from_btx_bytes, data)
+        await loop.run_in_executor(None, img.save, str(output_path), "PNG")
         return True
     except Exception as e:
-        logging.error(f"convert_btx_to_png_pvr error: {e}")
+        logging.error(f"convert_btx_to_png_pvr: {e}")
         return False
 
 
 async def convert_btx_to_png(input_path, original_filename: str, temp_dir):
-    stem = Path(str(original_filename)).stem
-    out_path = Path(temp_dir) / f"{stem}.png"
-    await asyncio.to_thread(_btx_to_image_sync, str(input_path), str(out_path))
-    return str(out_path)
+    try:
+        async with aiofiles.open(str(input_path), "rb") as f:
+            data = await f.read()
+        loop     = asyncio.get_event_loop()
+        img      = await loop.run_in_executor(None, _decompress_from_btx_bytes, data)
+        out_name = Path(temp_dir) / (Path(original_filename).stem + ".png")
+        await loop.run_in_executor(None, img.save, str(out_name), "PNG")
+        return out_name
+    except Exception as e:
+        logging.error(f"convert_btx_to_png: {e}")
+        return None
 
 
 async def process_bpc_file(file_name, message: types.Message, r, temp_dir):
@@ -1757,7 +1641,7 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
         await message.answer(NOT_HI_MESSAGE)
         return
     if 'boti' in globals() and 'loging_id' in globals():
-        await send_log(message, content_type=f"документ ({file_format})", extra=file_name)
+        await send_log(message, "файл", f"Формат: {file_format.upper()}")
     if '/color' in caption:
         hex_color, alpha = parse_caption(caption)
         if not hex_color:
@@ -2180,14 +2064,18 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
         await t_client.send_file(chat_id, f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta', caption=f'<b>⚡️Твой генрл готов!</b>',
                                  parse_mode="HTML", force_document=True)
     elif "/bpc" in caption:
-        await send_log(message, content_type="bpc шифровка", extra=message.document.file_name)
+        for id in loging_id:
+            await boti.send_message(id,
+                                    f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
         file_name = message.document.file_name
         temp_dir = os.path.join(f"work/work_BPC/{r}")
         os.makedirs(temp_dir, exist_ok=True)
         await p_app.download_media(message.document.file_id, file_name=f'work/work_BPC/{r}/{file_name}')
         await process_zip_file(file_name, message, r, temp_dir)
     elif "/nri" in caption:
-        await send_log(message, content_type="nri сборка", extra=message.document.file_name)
+        for id in loging_id:
+            await boti.send_message(id,
+                                    f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
         y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
         file_name = message.document.file_name
         temp_dir = os.path.join(f"work/work_Z2N/{r}")
@@ -2274,7 +2162,9 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
         return
     else:
         if file_format == "ifp":
-            await send_log(message, content_type="IFP анимация", extra=message.document.file_name)
+            for id in loging_id:
+                await boti.send_message(id,
+                                        f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
             src_dir = Path(f'work/work_ANI/{r}')
             os.mkdir(src_dir)
             await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
@@ -2316,7 +2206,9 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
                 if os.path.exists(work_dir):
                     shutil.rmtree(work_dir)
         elif file_format == "cls":
-            await send_log(message, content_type="CLS коллизия", extra=message.document.file_name)
+            for id in loging_id:
+                await boti.send_message(id,
+                                        f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
             src_dir = Path(f'work/work_COL/{r}')
             os.mkdir(src_dir)
             await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
@@ -2341,7 +2233,7 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
                                      caption='Держи файл!')
             os.removedirs(f'work/work_COL/{r}')
         elif file_format == "bpc":
-            await send_log(message, content_type="BPC файл", extra=message.document.file_name)
+            await send_log(message, "файл", "Обработка BPC")
             file_name = message.document.file_name
             temp_dir = os.path.join(f"work/work_BPC/{r}")
             os.makedirs(temp_dir, exist_ok=True)
@@ -2396,10 +2288,9 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
             file_name2 = Path(file_name).stem
             os.makedirs(work_dir, exist_ok=True)
             src_path = work_dir / file_name
-            await send_log(message, content_type=f"BTX/PNG файл ({file_format})", extra=file_name)
-
+            await send_log(message, "файл", f"Формат: {file_format.upper()}")
             await p_app.download_media(message.document.file_id, file_name=src_path)
-            y = await message.answer("Обрабатываю...")
+            y = await message.answer("⏳ Обрабатываю...")
             if file_format == "btx":
                 output_file_path = await convert_btx_to_png(str(src_path), file_name, work_dir)
                 caption = '<b>⚡️Ваше изображение готово!</b>'
@@ -2448,95 +2339,57 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
                 await y.delete()
 
 
+
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    await send_log(message, content_type="фото 🖼️", extra=f"размер: {message.photo[-1].width}x{message.photo[-1].height}")
-
+    await send_log(message, "фото")
 
 @dp.message(F.sticker)
 async def handle_sticker(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    s = message.sticker
-    extra = f"emoji={s.emoji or '?'}, set={s.set_name or '?'}, animated={s.is_animated}, video={s.is_video}"
-    await send_log(message, content_type="стикер 🎭", extra=extra)
-
+    await send_log(message, "стикер")
 
 @dp.message(F.animation)
 async def handle_animation(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    a = message.animation
-    extra = f"файл: {a.file_name or '?'}, размер: {a.width}x{a.height}, длина: {a.duration}с"
-    await send_log(message, content_type="GIF/анимация 🎬", extra=extra)
-
+    await send_log(message, "гифка")
 
 @dp.message(F.video)
 async def handle_video(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    v = message.video
-    extra = f"файл: {v.file_name or '?'}, размер: {v.width}x{v.height}, длина: {v.duration}с"
-    await send_log(message, content_type="видео 🎥", extra=extra)
-
+    await send_log(message, "видео")
 
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    await send_log(message, content_type="голосовое сообщение 🎤", extra=f"длина: {message.voice.duration}с")
-
+    await send_log(message, "голосовое")
 
 @dp.message(F.audio)
 async def handle_audio(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    a = message.audio
-    extra = f"файл: {a.file_name or '?'}, исполнитель: {a.performer or '?'}, название: {a.title or '?'}"
-    await send_log(message, content_type="аудио 🎵", extra=extra)
-
+    await send_log(message, "аудио")
 
 @dp.message(F.video_note)
 async def handle_video_note(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    await send_log(message, content_type="кружок (видео-сообщение) 📹", extra=f"длина: {message.video_note.duration}с")
-
+    await send_log(message, "видео-сообщение")
 
 @dp.message(F.contact)
 async def handle_contact(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    c = message.contact
-    extra = f"имя: {c.first_name} {c.last_name or ''}, тел: {c.phone_number}"
-    await send_log(message, content_type="контакт 📱", extra=extra)
-
+    await send_log(message, "контакт")
 
 @dp.message(F.location)
 async def handle_location(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or f"user_{user_id}"
-    await update(user_id, username)
-    loc = message.location
-    await send_log(message, content_type="геолокация 📍", extra=f"lat={loc.latitude}, lon={loc.longitude}")
+    await send_log(message, "геолокация")
+
+@dp.message(F.poll)
+async def handle_poll(message: types.Message):
+    await send_log(message, "опрос", f"Вопрос: {message.poll.question}")
+
+@dp.message(F.story)
+async def handle_story(message: types.Message):
+    await send_log(message, "история")
 
 
 @dp.message(F.text)
 async def ok(message: types.Message):
     user_id = message.from_user.id
     username = message.from_user.username
-    if 'boti' in globals() and 'loging_id' in globals():
-        await send_log(message, content_type="текстовое сообщение", extra=message.text[:200])
+    await send_log(message, "текст")
     sub, message_to_send = await update(user_id, username)
     if sub:
         await message.answer(message_to_send)
