@@ -55,42 +55,25 @@ t_client = TelegramClient("tele_upload_session", API_ID, API_HASH)
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
 boti = Bot(token=token2)
-
-# ─────────────────────────────────────────────────────────
-# Logging Middleware — перехватывает ВСЕ входящие апдейты
-# и пересылает подробный лог в boti → loging_id
-# ─────────────────────────────────────────────────────────
-
 class LoggingMiddleware(BaseMiddleware):
-    """Логирует любое входящее сообщение/апдейт и шлёт в boti."""
-
     async def __call__(self, handler, event: TelegramObject, data: dict):
-        # Пробуем вытащить объект message из любого типа апдейта
         update: Update = data.get("event_update")
         msg = None
         if update:
             msg = (update.message or update.edited_message
                    or update.channel_post or update.edited_channel_post)
-
         if msg:
             await self._log_message(msg)
-
         return await handler(event, data)
-
     async def _log_message(self, msg: types.Message):
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user = msg.from_user
         chat = msg.chat
-
-        # Базовая инфа об отправителе
         if user:
             who = f"@{user.username or '—'} (id={user.id}, {user.full_name})"
         else:
             who = f"chat_id={chat.id} [{chat.type}]"
-
         lines = [f"[{now}] {who}"]
-
-        # Тип и содержимое
         if msg.text:
             lines.append(f"✉️ Текст: {msg.text[:300]}")
         elif msg.caption:
@@ -130,21 +113,13 @@ class LoggingMiddleware(BaseMiddleware):
         if msg.forward_from or msg.forward_from_chat:
             src = msg.forward_from or msg.forward_from_chat
             lines.append(f"↩️ Пересланное от: {getattr(src, 'full_name', None) or getattr(src, 'title', '—')}")
-
-        # Чат
         lines.append(f"💬 Чат: {chat.title or '—'} (id={chat.id}, тип={chat.type})")
-
         log_text = "\n".join(lines)
-
-        # Отправляем в каждый ID из loging_id — без исключений чтобы не ломать бота
         for chat_id in loging_id:
             try:
                 await boti.send_message(chat_id, log_text)
             except Exception as e:
                 logging.warning(f"LoggingMiddleware: не удалось отправить лог в {chat_id}: {e}")
-
-
-# ─────────────────────────────────────────────────────────
 NOT_HI_MESSAGE = "Здравствуйте! Чтобы использовать бота, вам необходимо оформить подписку @keedboy016"
 length = 4
 DB_PATH = 'users.db'
@@ -217,27 +192,21 @@ bild = ['reclam65', 'reclam66', 'Billb_SanVice', 'BLBRD_3_889', 'reclam67', 'BLB
 
 class OverlayStates(StatesGroup):
     waiting_for_second_image = State()
-
 def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
     base = Image.open(base_input).convert("RGBA")
     overlay = Image.open(overlay_input).convert("RGBA")
-
-    # Подгоняем overlay под размер базы
     overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
-
-    # --- ЛОГИКА РЕЖИМОВ ---
-    if mode == "multiply":  # Наложение на БЕЛОЕ (затемнение)
+    if mode == "multiply":
         effect = ImageChops.multiply(base, overlay)
-    elif mode == "screen":  # Наложение на ЧЕРНОЕ (осветление)
-        # Делаем эффект сильнее через двойное наложение
+    elif mode == "screen":
         effect = ImageChops.screen(base, overlay)
         effect = ImageChops.screen(effect, overlay)
-    elif mode == "overlay":  # Смешанный режим (контрастный)
+    elif mode == "overlay":
         effect = ImageChops.overlay(base, overlay)
         effect = ImageChops.overlay(effect, overlay)
-    elif mode == "add":  # Экстремальное осветление
+    elif mode == "add":
         effect = ImageChops.add(base, overlay)
-    elif mode == "darker":  # Оставляет только самые темные пиксели
+    elif mode == "darker":
         effect = ImageChops.darker(base, overlay)
     else:
         effect = overlay
@@ -252,8 +221,6 @@ def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
     else:
         final.convert("RGBA").save(img_byte_arr, format='PNG')
     return img_byte_arr.getvalue()
-
-
 def _process_zip_overlay(zip_path, overlay_img_path, mode, alpha_pct):
     import zipfile
     output_zip_buffer = io.BytesIO()
@@ -261,25 +228,18 @@ def _process_zip_overlay(zip_path, overlay_img_path, mode, alpha_pct):
     with zipfile.ZipFile(zip_path, 'r') as archive_in:
         with zipfile.ZipFile(output_zip_buffer, 'a', zipfile.ZIP_DEFLATED) as archive_out:
             for file_info in archive_in.infolist():
-                # Игнорируем папки и скрытые файлы MacOS/Windows
                 if file_info.is_dir() or file_info.filename.startswith('__MACOSX') or \
                         not file_info.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                     continue
 
                 with archive_in.open(file_info) as file:
                     try:
-                        # Читаем изображение из архива
                         img_bytes = io.BytesIO(file.read())
-
-                        # Применяем наложение (используем нашу функцию _process_overlay_logic)
                         processed_bytes = _process_overlay_logic(img_bytes, overlay_img_path, mode, alpha_pct)
-
-                        # Сохраняем в новый ZIP под тем же именем
                         archive_out.writestr(file_info.filename, processed_bytes)
                     except Exception as e:
                         print(f"Ошибка при обработке файла {file_info.filename}: {e}")
                         continue
-
     output_zip_buffer.seek(0)
     return output_zip_buffer
 
@@ -312,7 +272,6 @@ async def create_palette_image(image_path, file_name, n_colors=10, output_file="
         draw.text((i * swatch_width + 10, height // 2 - 10), hex_val, fill=text_color, font=font)
     palette_img.save(output_file)
     return o
-
 def random_color():
     h = random.random()
     s = random.uniform(0.5, 0.8)
