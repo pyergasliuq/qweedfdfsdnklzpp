@@ -551,6 +551,26 @@ async def safe_delete(file_path: Path, max_attempts=3):
     return False
 
 
+BTX_QUALITY_MAP = {
+    "fastest":    0.0,
+    "fast":       10.0,
+    "medium":     60.0,
+    "thorough":   98.0,
+    "exhaustive": 100.0,
+}
+
+BTX_BLOCK_MAP = {
+    "4x4": (4, 4), "6x6": (6, 6), "8x8": (8, 8),
+    "5x5": (5, 5), "8x5": (8, 5), "8x6": (8, 6),
+    "10x10": (10, 10), "12x12": (12, 12),
+}
+
+BTX_DEFAULT_BLOCK   = (8, 8)
+BTX_DEFAULT_QUALITY = 60.0
+
+btx_user_settings: dict[int, dict] = {}
+
+
 def _btx_internal_format(block_w: int, block_h: int) -> int:
     return {
         (4, 4): 0x93B0, (5, 5): 0x93B2, (6, 6): 0x93B4,
@@ -559,11 +579,11 @@ def _btx_internal_format(block_w: int, block_h: int) -> int:
     }[(block_w, block_h)]
 
 
-def _compress_to_btx_bytes(img: Image.Image, block_w: int = 8, block_h: int = 8) -> bytes:
+def _compress_to_btx_bytes(img: Image.Image, block_w: int = 8, block_h: int = 8, quality: float = 60.0) -> bytes:
     from astc_encoder import ASTCConfig, ASTCContext, ASTCImage, ASTCProfile, ASTCSwizzle, ASTCType
     img = img.convert("RGBA")
     w, h = img.size
-    cfg  = ASTCConfig(ASTCProfile.LDR, block_w, block_h, 1, 60.0)
+    cfg  = ASTCConfig(ASTCProfile.LDR, block_w, block_h, 1, quality)
     ctx  = ASTCContext(cfg)
     aimg = ASTCImage(ASTCType.U8, w, h, data=img.tobytes())
     comp = ctx.compress(aimg, ASTCSwizzle.from_str("RGBA"))
@@ -595,11 +615,12 @@ def _decompress_from_btx_bytes(data: bytes) -> Image.Image:
     return Image.frombytes("RGBA", (w, h), bytes(aimg.data))
 
 
-async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
+async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path,
+                                  block_w: int = 8, block_h: int = 8, quality: float = 60.0) -> bool:
     try:
         loop = asyncio.get_event_loop()
         img  = await loop.run_in_executor(None, Image.open, str(input_path))
-        btx  = await loop.run_in_executor(None, _compress_to_btx_bytes, img)
+        btx  = await loop.run_in_executor(None, _compress_to_btx_bytes, img, block_w, block_h, quality)
         async with aiofiles.open(str(temp_ktx), "wb") as f:
             await f.write(btx)
         return True
@@ -608,11 +629,12 @@ async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
         return False
 
 
-async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir):
+async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir,
+                              block_w: int = 8, block_h: int = 8, quality: float = 60.0):
     try:
         loop     = asyncio.get_event_loop()
         img      = await loop.run_in_executor(None, Image.open, str(input_path))
-        btx      = await loop.run_in_executor(None, _compress_to_btx_bytes, img)
+        btx      = await loop.run_in_executor(None, _compress_to_btx_bytes, img, block_w, block_h, quality)
         out_name = Path(temp_dir) / (Path(original_filename).stem + ".btx")
         async with aiofiles.open(str(out_name), "wb") as f:
             await f.write(btx)
@@ -2288,38 +2310,87 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
             file_name2 = Path(file_name).stem
             os.makedirs(work_dir, exist_ok=True)
             src_path = work_dir / file_name
-            await send_log(message, "файл", f"Формат: {file_format.upper()}")
+
+            s = btx_user_settings.get(message.from_user.id, {})
+            bw, bh  = s.get("block", BTX_DEFAULT_BLOCK)
+            quality = s.get("quality", BTX_DEFAULT_QUALITY)
+
+            await send_log(message, "файл", f"Формат: {file_format.upper()} | ASTC {bw}x{bh} | quality={quality}")
             await p_app.download_media(message.document.file_id, file_name=src_path)
             y = await message.answer("⏳ Обрабатываю...")
-            if file_format == "btx":
-                output_file_path = await convert_btx_to_png(str(src_path), file_name, work_dir)
-                caption = '<b>⚡️Ваше изображение готово!</b>'
 
-            elif file_format in ("png", "jpg"):
-                output_file_path = await convert_png_to_btx(str(src_path), file_name, work_dir)
-                caption = '<b>⚡️Ваше изображение готово!</b>'
-            elif file_format == "zip":
-                with zipfile.ZipFile(src_path, 'r') as zip_ref:
-                    zip_ref.extractall(work_dir)
-                rand_string = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
-                output_file_path = work_dir / f'{rand_string}_BTX.zip'
-                files_to_process = [file for file in work_dir.glob('*') if
-                                    file.is_file() and file.name not in (file_name, output_file_path.name)]
-                processing_tasks = []
-                for file in files_to_process:
-                    inner_file_format = file.suffix.lower()
-                    inner_file_name2 = file.stem
-                    if inner_file_format == ".btx":
-                        output_file = processing_tasks.append(convert_btx_to_png(str(file), inner_file_name2, work_dir))
-                    elif inner_file_format in (".png", ".jpg"):
-                        output_file = processing_tasks.append(convert_png_to_btx(str(file), inner_file_name2, work_dir))
-                await asyncio.gather(*processing_tasks)
-                with zipfile.ZipFile(output_file_path, 'a') as f_zip_out:
-                    for file in work_dir.glob('*'):
-                        if file.suffix.lower() in ('.png', '.btx') and file.name != file_name:
-                            f_zip_out.write(file, file.name)
+            try:
+                if file_format == "btx":
+                    output_file_path = await convert_btx_to_png(str(src_path), file_name, work_dir)
+                    if output_file_path:
+                        await y.delete()
+                        await bot.send_document(
+                            message.chat.id,
+                            FSInputFile(output_file_path),
+                            caption="<b>⚡️ Ваше изображение готово!</b>",
+                            parse_mode="HTML"
+                        )
+                    else:
+                        await y.edit_text("❌ Ошибка при конвертации BTX → PNG")
 
-                caption = '<b>⚡️Ваши файлы готовы!</b>'
+                elif file_format in ("png", "jpg", "jpeg"):
+                    output_file_path = await convert_png_to_btx(str(src_path), file_name, work_dir, bw, bh, quality)
+                    if output_file_path:
+                        await y.delete()
+                        await bot.send_document(
+                            message.chat.id,
+                            FSInputFile(output_file_path),
+                            caption=(
+                                f"<b>⚡️ Ваш файл готов!</b>\n"
+                                f"🔧 ASTC <code>{bw}x{bh}</code> | quality: <code>{s.get('quality_name','medium')}</code>"
+                            ),
+                            parse_mode="HTML"
+                        )
+                    else:
+                        await y.edit_text("❌ Ошибка при конвертации PNG → BTX")
+
+                elif file_format == "zip":
+                    out_zip_path = work_dir / f'{r}_result.zip'
+                    tasks = []
+                    files_to_process = [
+                        f for f in work_dir.iterdir()
+                        if f.is_file() and f.name != file_name
+                    ]
+                    with zipfile.ZipFile(src_path, 'r') as zin:
+                        zin.extractall(work_dir)
+
+                    files_to_process = [
+                        f for f in work_dir.iterdir()
+                        if f.is_file() and f.name != file_name and f.suffix.lower() in ('.png', '.jpg', '.jpeg', '.btx')
+                    ]
+
+                    async def _process_one(f: Path):
+                        if f.suffix.lower() == ".btx":
+                            return await convert_btx_to_png(str(f), f.name, work_dir)
+                        else:
+                            return await convert_png_to_btx(str(f), f.name, work_dir, bw, bh, quality)
+
+                    results = await asyncio.gather(*[_process_one(f) for f in files_to_process], return_exceptions=True)
+
+                    with zipfile.ZipFile(out_zip_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+                        for res in results:
+                            if isinstance(res, Path) and res and res.exists():
+                                zout.write(res, res.name)
+
+                    await y.delete()
+                    await bot.send_document(
+                        message.chat.id,
+                        FSInputFile(out_zip_path),
+                        caption=(
+                            f"<b>⚡️ Ваш архив готов!</b>\n"
+                            f"🔧 ASTC <code>{bw}x{bh}</code> | quality: <code>{s.get('quality_name','medium')}</code>\n"
+                            f"📦 Обработано файлов: <code>{len([r for r in results if isinstance(r, Path) and r])}</code>"
+                        ),
+                        parse_mode="HTML"
+                    )
+            except Exception as e:
+                logging.error(f"BTX handler error: {e}", exc_info=True)
+                await y.edit_text("❌ Произошла ошибка при обработке файла")
         elif file_format == "dat":
             y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
             try:
@@ -2951,6 +3022,50 @@ async def ok(message: types.Message):
         finally:
             if 'work_dir' in locals() and work_dir.exists():
                 shutil.rmtree(work_dir)
+    elif '/btx' in message.text.split():
+        parts = message.text.strip().split()
+        block_arg   = parts[1].lower() if len(parts) > 1 else None
+        quality_arg = parts[2].lower() if len(parts) > 2 else None
+
+        valid_blocks   = list(BTX_BLOCK_MAP.keys())
+        valid_quality  = list(BTX_QUALITY_MAP.keys())
+
+        errors = []
+        bw, bh  = BTX_DEFAULT_BLOCK
+        quality = BTX_DEFAULT_QUALITY
+        quality_name = "medium"
+
+        if block_arg:
+            if block_arg in BTX_BLOCK_MAP:
+                bw, bh = BTX_BLOCK_MAP[block_arg]
+            else:
+                errors.append(f"❌ Неверный формат блока: <code>{block_arg}</code>\nДоступные: {', '.join(valid_blocks)}")
+
+        if quality_arg:
+            if quality_arg in BTX_QUALITY_MAP:
+                quality      = BTX_QUALITY_MAP[quality_arg]
+                quality_name = quality_arg
+            else:
+                errors.append(f"❌ Неверное качество: <code>{quality_arg}</code>\nДоступные: {', '.join(valid_quality)}")
+
+        if errors:
+            await message.answer("\n".join(errors), parse_mode="HTML")
+            return
+
+        btx_user_settings[message.from_user.id] = {
+            "block":        (bw, bh),
+            "quality":      quality,
+            "quality_name": quality_name,
+        }
+
+        await message.answer(
+            f"✅ <b>Настройки BTX сохранены</b>\n"
+            f"🔷 Блок: <code>{bw}x{bh}</code>\n"
+            f"⚙️ Качество: <code>{quality_name}</code>\n\n"
+            f"Теперь отправьте <b>.png / .jpg / .btx / .zip</b> — будут использованы эти настройки.",
+            parse_mode="HTML"
+        )
+
     elif '/search' in message.text.split():
         y = await message.answer("Обрабатываю...")
         try:
@@ -3120,15 +3235,12 @@ bpc
 <i><b>файл.mod</b></i> - расшифровка моделей
 <i><b>timecyc.dat</b></i>- конвертация Samp неба в Black Russia
 <i><b>timecyc.json</b></i> - узнать цвета из Timecyc""", parse_mode='HTML')
-
     elif "/sub" in message.text and len(message.text.split()) >= 3:
         sender_id = message.from_user.id
         admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (sender_id,), fetchone=True)
         if admin_status_row and admin_status_row[0] == 'True':
             target_user_id = int(j[1])
-            target_user_row = execute_sql_query("SELECT username FROM users WHERE chat_id=?", (target_user_id,),
-                                                fetchone=True)
-
+            target_user_row = execute_sql_query("SELECT username FROM users WHERE chat_id=?", (target_user_id,), fetchone=True)
             if target_user_row:
                 target_username = target_user_row[0]
                 action = j[2]
@@ -3145,7 +3257,6 @@ bpc
                 elif action == 'False':
                     execute_sql_query("UPDATE users SET sub='False', time=NULL WHERE chat_id=?", (target_user_id,))
                     await message.answer(f"У пользователя {target_username} успешно забрана подписка!")
-
                 else:
                     await message.answer("Неверный формат команды или статуса подписки ('True'/'False')!")
             else:
@@ -3154,24 +3265,17 @@ bpc
             await message.answer("У вас нет прав администратора для выполнения этой команды.")
 
     elif "/kotek" in message.text:
-        await update(message.chat.id, message.from_user.username)  # Убеждаемся, что админ в БД
+        await update(message.chat.id, message.from_user.username)
         sender_id = message.from_user.id
-
         admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (sender_id,), fetchone=True)
-
         if admin_status_row and admin_status_row[0] == 'True':
-            # Получаем список всех chat_id из базы данных
             all_users = execute_sql_query("SELECT chat_id FROM users", fetchall=True)
-
             message_to_send = message.text.replace("/rass", "").strip()
-
             if message_to_send:
                 for user_row in all_users:
                     user_id = user_row[0]
                     try:
-                        # Асинхронная отправка сообщения
                         await bot.send_message(user_id, message_to_send)
-                        # Можно добавить небольшую задержку, чтобы Telegram не забанил за спам
                         await asyncio.sleep(0.1)
                     except Exception as e:
                         print(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
@@ -3180,7 +3284,6 @@ bpc
                 await message.answer("Введите текст рассылки после команды /rass.")
         else:
             await message.answer("У вас нет прав администратора для выполнения этой команды.")
-
     elif "/send" in message.text:
         sender_id = message.from_user.id
         target_id_str = j[1]
@@ -3200,19 +3303,14 @@ bpc
                 await message.answer(f"Ошибка при отправке сообщения: {e}")
         else:
             await message.answer("У вас нет прав администратора для выполнения этой команды.")
-
-
 async def main():
     await setup_work_dirs()
     await p_app.start()
     await t_client.start(bot_token=BOT_TOKEN)
-
     try:
         await dp.start_polling(bot)
     finally:
         await p_app.stop()
         await t_client.disconnect()
-
-
 if __name__ == "__main__":
     asyncio.run(main())
