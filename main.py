@@ -1,4 +1,5 @@
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
+from aiogram.types import TelegramObject, Update
 import asyncio
 import logging
 import sqlite3
@@ -37,6 +38,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
+from btx_converter import image_to_btx, btx_to_image, ensure_astcenc
 
 load_dotenv()
 
@@ -53,6 +55,96 @@ t_client = TelegramClient("tele_upload_session", API_ID, API_HASH)
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
 boti = Bot(token=token2)
+
+# ─────────────────────────────────────────────────────────
+# Logging Middleware — перехватывает ВСЕ входящие апдейты
+# и пересылает подробный лог в boti → loging_id
+# ─────────────────────────────────────────────────────────
+
+class LoggingMiddleware(BaseMiddleware):
+    """Логирует любое входящее сообщение/апдейт и шлёт в boti."""
+
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        # Пробуем вытащить объект message из любого типа апдейта
+        update: Update = data.get("event_update")
+        msg = None
+        if update:
+            msg = (update.message or update.edited_message
+                   or update.channel_post or update.edited_channel_post)
+
+        if msg:
+            await self._log_message(msg)
+
+        return await handler(event, data)
+
+    async def _log_message(self, msg: types.Message):
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user = msg.from_user
+        chat = msg.chat
+
+        # Базовая инфа об отправителе
+        if user:
+            who = f"@{user.username or '—'} (id={user.id}, {user.full_name})"
+        else:
+            who = f"chat_id={chat.id} [{chat.type}]"
+
+        lines = [f"[{now}] {who}"]
+
+        # Тип и содержимое
+        if msg.text:
+            lines.append(f"✉️ Текст: {msg.text[:300]}")
+        elif msg.caption:
+            lines.append(f"📎 Подпись: {msg.caption[:300]}")
+
+        if msg.document:
+            lines.append(f"📄 Файл: {msg.document.file_name}  "
+                         f"({round(msg.document.file_size / 1024, 1)} KB)  "
+                         f"[{msg.document.mime_type}]")
+        if msg.photo:
+            lines.append(f"🖼 Фото (размер: {msg.photo[-1].width}×{msg.photo[-1].height})")
+        if msg.video:
+            lines.append(f"🎬 Видео: {msg.video.file_name or '—'}  "
+                         f"({round(msg.video.file_size / 1024 / 1024, 2)} MB)")
+        if msg.audio:
+            lines.append(f"🎵 Аудио: {msg.audio.file_name or '—'}  "
+                         f"({round(msg.audio.file_size / 1024, 1)} KB)")
+        if msg.voice:
+            lines.append(f"🎤 Голосовое ({msg.voice.duration} сек)")
+        if msg.video_note:
+            lines.append(f"⭕️ Видео-кружок ({msg.video_note.duration} сек)")
+        if msg.sticker:
+            lines.append(f"🎴 Стикер: {msg.sticker.emoji or ''} [{msg.sticker.set_name or '—'}]")
+        if msg.animation:
+            lines.append(f"🎞 GIF: {msg.animation.file_name or '—'}")
+        if msg.contact:
+            lines.append(f"📱 Контакт: {msg.contact.first_name} {msg.contact.phone_number}")
+        if msg.location:
+            lines.append(f"📍 Локация: {msg.location.latitude}, {msg.location.longitude}")
+        if msg.poll:
+            lines.append(f"📊 Опрос: {msg.poll.question}")
+        if msg.new_chat_members:
+            names = ", ".join(u.full_name for u in msg.new_chat_members)
+            lines.append(f"➕ Новые участники: {names}")
+        if msg.left_chat_member:
+            lines.append(f"➖ Покинул чат: {msg.left_chat_member.full_name}")
+        if msg.forward_from or msg.forward_from_chat:
+            src = msg.forward_from or msg.forward_from_chat
+            lines.append(f"↩️ Пересланное от: {getattr(src, 'full_name', None) or getattr(src, 'title', '—')}")
+
+        # Чат
+        lines.append(f"💬 Чат: {chat.title or '—'} (id={chat.id}, тип={chat.type})")
+
+        log_text = "\n".join(lines)
+
+        # Отправляем в каждый ID из loging_id — без исключений чтобы не ломать бота
+        for chat_id in loging_id:
+            try:
+                await boti.send_message(chat_id, log_text)
+            except Exception as e:
+                logging.warning(f"LoggingMiddleware: не удалось отправить лог в {chat_id}: {e}")
+
+
+# ─────────────────────────────────────────────────────────
 NOT_HI_MESSAGE = "Здравствуйте! Чтобы использовать бота, вам необходимо оформить подписку @keedboy016"
 length = 4
 DB_PATH = 'users.db'
@@ -491,23 +583,59 @@ async def safe_delete(file_path: Path, max_attempts=3):
 
 
 async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path) -> bool:
-    ...
-    # ПОСЛЕ ОБНОВЛЕНИЯ СЕРВИСА
+    """Вспомогательная: кодирует PNG → BTX через btx_converter."""
+    try:
+        await asyncio.to_thread(
+            image_to_btx,
+            str(input_path),
+            str(temp_ktx),
+            "4x4",
+            "medium",
+        )
+        return True
+    except Exception as e:
+        logging.error(f"convert_png_to_btx_pvr error: {e}")
+        return False
 
 
-async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir):
-    ...
-    # после обноваления
+async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir) -> Path:
+    """
+    Конвертирует PNG/JPG → BTX.
+    Возвращает путь к готовому .btx файлу.
+    """
+    temp_dir = Path(temp_dir)
+    stem = Path(original_filename).stem
+    out_path = temp_dir / f"{stem}.btx"
+    await asyncio.to_thread(
+        image_to_btx,
+        str(input_path),
+        str(out_path),
+        "4x4",
+        "medium",
+    )
+    return out_path
 
 
-async def convert_btx_to_png_pvr(temp_ktx, output_path):
-    ...
-    # после обноваления
+async def convert_btx_to_png_pvr(btx_path, output_path) -> bool:
+    """Вспомогательная: декодирует BTX → PNG через btx_converter."""
+    try:
+        await asyncio.to_thread(btx_to_image, str(btx_path), str(output_path))
+        return True
+    except Exception as e:
+        logging.error(f"convert_btx_to_png_pvr error: {e}")
+        return False
 
 
-async def convert_btx_to_png(input_path, original_filename: str, temp_dir):
-    ...
-    # после обноваления
+async def convert_btx_to_png(input_path, original_filename: str, temp_dir) -> Path:
+    """
+    Конвертирует BTX → PNG.
+    Возвращает путь к готовому .png файлу.
+    """
+    temp_dir = Path(temp_dir)
+    stem = Path(original_filename).stem
+    out_path = temp_dir / f"{stem}.png"
+    await asyncio.to_thread(btx_to_image, str(input_path), str(out_path))
+    return out_path
 
 
 async def process_bpc_file(file_name, message: types.Message, r, temp_dir):
@@ -2149,48 +2277,56 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
                                      parse_mode="HTML", force_document=True)
 
         elif file_format in ["btx", "png", "jpg", "jpeg", "zip"]:
-            y = await message.answer("В данный момент мы чиним и конверт BTX не работает")
-            return
             work_dir = Path(f'work/work_BTX/{r}')
             file_name = message.document.file_name
             file_name2 = Path(file_name).stem
             os.makedirs(work_dir, exist_ok=True)
             src_path = work_dir / file_name
-            for user_id in loging_id:
-                await boti.send_message(user_id,
-                                        f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {file_name} (обработка btx)")
 
             await p_app.download_media(message.document.file_id, file_name=src_path)
-            y = await message.answer("Обрабатываю...")
-            if file_format == "btx":
-                output_file_path = await convert_btx_to_png(str(src_path), file_name, work_dir)
-                caption = '<b>⚡️Ваше изображение готово!</b>'
+            y = await message.answer("⏳ Обрабатываю BTX...")
+            try:
+                if file_format == "btx":
+                    output_file_path = await convert_btx_to_png(str(src_path), file_name, work_dir)
+                    caption = '<b>⚡️Ваше изображение готово!</b>'
+                    await t_client.send_file(message.chat.id, str(output_file_path),
+                                             caption=caption, parse_mode="HTML", force_document=True)
 
-            elif file_format in ("png", "jpg"):
-                output_file_path = await convert_png_to_btx(str(src_path), file_name, work_dir)
-                caption = '<b>⚡️Ваше изображение готово!</b>'
-            elif file_format == "zip":
-                with zipfile.ZipFile(src_path, 'r') as zip_ref:
-                    zip_ref.extractall(work_dir)
-                rand_string = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
-                output_file_path = work_dir / f'{rand_string}_BTX.zip'
-                files_to_process = [file for file in work_dir.glob('*') if
-                                    file.is_file() and file.name not in (file_name, output_file_path.name)]
-                processing_tasks = []
-                for file in files_to_process:
-                    inner_file_format = file.suffix.lower()
-                    inner_file_name2 = file.stem
-                    if inner_file_format == ".btx":
-                        output_file = processing_tasks.append(convert_btx_to_png(str(file), inner_file_name2, work_dir))
-                    elif inner_file_format in (".png", ".jpg"):
-                        output_file = processing_tasks.append(convert_png_to_btx(str(file), inner_file_name2, work_dir))
-                await asyncio.gather(*processing_tasks)
-                with zipfile.ZipFile(output_file_path, 'a') as f_zip_out:
-                    for file in work_dir.glob('*'):
-                        if file.suffix.lower() in ('.png', '.btx') and file.name != file_name:
-                            f_zip_out.write(file, file.name)
+                elif file_format in ("png", "jpg", "jpeg"):
+                    output_file_path = await convert_png_to_btx(str(src_path), file_name, work_dir)
+                    caption = '<b>⚡️Ваш BTX готов!</b>'
+                    await t_client.send_file(message.chat.id, str(output_file_path),
+                                             caption=caption, parse_mode="HTML", force_document=True)
 
-                caption = '<b>⚡️Ваши файлы готовы!</b>'
+                elif file_format == "zip":
+                    with zipfile.ZipFile(src_path, 'r') as zip_ref:
+                        zip_ref.extractall(work_dir)
+                    rand_string = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+                    output_file_path = work_dir / f'{rand_string}_BTX.zip'
+                    files_to_process = [f for f in work_dir.glob('*')
+                                        if f.is_file() and f.name not in (file_name, output_file_path.name)]
+                    processing_tasks = []
+                    for file in files_to_process:
+                        inner_fmt = file.suffix.lower().lstrip('.')
+                        if inner_fmt == "btx":
+                            processing_tasks.append(convert_btx_to_png(str(file), file.name, work_dir))
+                        elif inner_fmt in ("png", "jpg", "jpeg"):
+                            processing_tasks.append(convert_png_to_btx(str(file), file.name, work_dir))
+                    await asyncio.gather(*processing_tasks)
+                    with zipfile.ZipFile(output_file_path, 'w', zipfile.ZIP_DEFLATED) as f_zip_out:
+                        for file in work_dir.glob('*'):
+                            if file.suffix.lower() in ('.png', '.btx') and file.name != file_name:
+                                f_zip_out.write(file, file.name)
+                    caption = '<b>⚡️Ваши файлы готовы!</b>'
+                    await t_client.send_file(message.chat.id, str(output_file_path),
+                                             caption=caption, parse_mode="HTML", force_document=True)
+            except Exception as e:
+                logging.exception("BTX conversion error")
+                await message.answer(f"❌ Ошибка конвертации BTX: <code>{e}</code>", parse_mode="HTML")
+            finally:
+                await y.delete()
+                if work_dir.exists():
+                    shutil.rmtree(work_dir, ignore_errors=True)
         elif file_format == "dat":
             y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
             try:
@@ -3037,6 +3173,9 @@ async def main():
     await setup_work_dirs()
     await p_app.start()
     await t_client.start(bot_token=BOT_TOKEN)
+
+    # Регистрируем middleware логирования для всех входящих апдейтов
+    dp.update.middleware(LoggingMiddleware())
 
     try:
         await dp.start_polling(bot)
