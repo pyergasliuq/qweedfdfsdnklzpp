@@ -228,6 +228,32 @@ def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
         final.convert("RGBA").save(img_byte_arr, format='PNG')
     return img_byte_arr.getvalue()
 
+  async def kvadratik(hex_color):
+    FONT = ImageFont.truetype("arial.ttf", 24)
+    img_width = 400
+    img_height = 500
+    background_color_rgb = (128, 128, 128)
+    image = Image.new("RGB", (img_width, img_height), background_color_rgb)
+    draw = ImageDraw.Draw(image)
+    rect_width = 200
+    rect_height = 200
+    rect_x = (img_width - rect_width) // 2
+    rect_y = 150
+    radius = 20
+    hex_color_val = hex_color.lstrip('#')
+    rgb_color = tuple(int(hex_color_val[i:i + 2], 16) for i in (0, 2, 4))
+    draw.rounded_rectangle([(rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height)], radius, fill=rgb_color,
+                           outline=(0, 0, 0), width=2)
+    text = hex_color
+    text_color = (0, 0, 0) if sum(rgb_color) > 384 else (255, 255, 255)
+    bbox = draw.textbbox((0, 0), text, font=FONT)
+    text_width = bbox[2] - bbox[0]
+    text_x = (img_width - text_width) // 2
+    text_y = rect_y + rect_height + 20
+    draw.text((text_x, text_y), text, font=FONT, fill=text_color)
+    image_path = f"color_image_{hex_color.replace('#', '')}.png"
+    image.save(image_path)
+    return image_path
 
 def _process_zip_overlay(zip_path, overlay_img_path, mode, alpha_pct):
     import zipfile
