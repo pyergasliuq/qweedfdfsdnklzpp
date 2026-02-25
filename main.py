@@ -1055,21 +1055,7 @@ def _sync_aitimecyc(description: str) -> dict:
 
 
 async def aitimecyc(description: str):
-    """Generate timecyc colors via Groq AI based on text description."""
-    prompt = f"""Ты эксперт по настройке атмосферы в играх GTA SA. 
-На основе описания "{description}" придумай цветовую схему для timecyc.
-Верни ТОЛЬКО JSON без пояснений:
-{{
-  "SkyBottomRGB": [R, G, B],
-  "SkyTopRGB": [R, G, B],
-  "CloudRGB": [R, G, B],
-  "SunCoreRGB": [R, G, B],
-  "AmbientRGB": [R, G, B],
-  "DirectionalRGB": [R, G, B],
-  "FarClip": 700.0,
-  "FogStart": 100.0
-}}
-Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400."""
+    prompt = f'Ты эксперт по настройке атмосферы в играх GTA SA. \nНа основе описания "{description}" придумай цветовую схему для timecyc.\nВерни ТОЛЬКО JSON без пояснений:\n{{\n  "SkyBottomRGB": [R, G, B],\n  "SkyTopRGB": [R, G, B],\n  "CloudRGB": [R, G, B],\n  "SunCoreRGB": [R, G, B],\n  "AmbientRGB": [R, G, B],\n  "DirectionalRGB": [R, G, B],\n  "FarClip": 700.0,\n  "FogStart": 100.0\n}}\nВсе значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400.'
     completion = client.chat.completions.create(
         messages=[
             {"role": "system", "content": "Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
