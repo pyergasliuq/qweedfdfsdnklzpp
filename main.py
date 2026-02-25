@@ -887,15 +887,13 @@ async def filerpoisk(id_xyina: str, name_xyina: str, message):
 
 def assemble_image_from_zip_bytes(zip_bytes, name):
     scale_factor = 1.275
-
-    # Обновленные точные координаты, измеренные по исходному изображению, с учетом масштабирования:
     positions_map = {
-        'hud_back.png': (450, 240),  # Большой круг справа
-        'hud_up.png': (40, 150),  # Верхний левый прямоугольник ($)
-        'hud_center.png': (40, 290),  # Средний левый прямоугольник (сердечки)
-        'hud_down.png': (40, 490),  # Нижний средний левый прямоугольник
-        'hud_menu.png': (40, 770),  # Нижняя левая кнопка MENU
-        'hud_donat_store.png': (520, 770)  # Нижняя правая кнопка/квадрат ($)
+        'hud_back.png': (450, 240),
+        'hud_up.png': (40, 150),
+        'hud_center.png': (40, 290),
+        'hud_down.png': (40, 490),
+        'hud_menu.png': (40, 770),
+        'hud_donat_store.png': (520, 770)
     }
     output_size = (1000, 1000)
     assembled_img = Image.new('RGBA', output_size, (0, 0, 0, 0))
@@ -1027,10 +1025,10 @@ async def timecyc(j):
     with open("main.json", "r", encoding='utf-8') as f:
         timecyc_json_string = f.read()
     replacements = [
-        ('"SkyBottomRGB":[SBR016', f'"SkyBottomRGB":{list(ImageColor.getrgb(j[1]))}'),
-        ('"SkyTopRGB":[STR016', f'"SkyTopRGB":{list(ImageColor.getrgb(j[2]))}'),
-        ('"CloudRGB":[CLR016', f'"CloudRGB":{list(ImageColor.getrgb(j[3]))}'),
-        ('"SunCoreRGB":[SCR016', f'"SunCoreRGB":{list(ImageColor.getrgb(j[4]))}')
+        ('"SkyBottomRGB":[SBR016', f'"SkyBottomRGB":{str(list(ImageColor.getrgb(j[1]))).replace(" ",""}'),
+        ('"SkyTopRGB":[STR016', f'"SkyTopRGB":{str(list(ImageColor.getrgb(j[2]))).replace(" ",""}'),
+        ('"CloudRGB":[CLR016', f'"CloudRGB":{str(list(ImageColor.getrgb(j[3]))).replace(" ",""}'),
+        ('"SunCoreRGB":[SCR016', f'"SunCoreRGB":{str(list(ImageColor.getrgb(j[4]))).replace(" ",""}')
     ]
     for old_text, new_text in replacements:
         timecyc_json_string = timecyc_json_string.replace(old_text, new_text)
