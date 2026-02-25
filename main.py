@@ -1025,10 +1025,10 @@ async def timecyc(j):
     with open("main.json", "r", encoding='utf-8') as f:
         timecyc_json_string = f.read()
     replacements = [
-        ('"SkyBottomRGB":[SBR016', f'"SkyBottomRGB":{str(list(ImageColor.getrgb(j[1]))).replace(" ",""}'),
-        ('"SkyTopRGB":[STR016', f'"SkyTopRGB":{str(list(ImageColor.getrgb(j[2]))).replace(" ",""}'),
-        ('"CloudRGB":[CLR016', f'"CloudRGB":{str(list(ImageColor.getrgb(j[3]))).replace(" ",""}'),
-        ('"SunCoreRGB":[SCR016', f'"SunCoreRGB":{str(list(ImageColor.getrgb(j[4]))).replace(" ",""}')
+        ('"SkyBottomRGB":[SBR016', f'"SkyBottomRGB":{str(list(ImageColor.getrgb(j[1]))).replace(" ","")}'),
+        ('"SkyTopRGB":[STR016', f'"SkyTopRGB":{str(list(ImageColor.getrgb(j[2]))).replace(" ","")}'),
+        ('"CloudRGB":[CLR016', f'"CloudRGB":{str(list(ImageColor.getrgb(j[3]))).replace(" ","")}'),
+        ('"SunCoreRGB":[SCR016', f'"SunCoreRGB":{str(list(ImageColor.getrgb(j[4]))).replace(" ","")}')
     ]
     for old_text, new_text in replacements:
         timecyc_json_string = timecyc_json_string.replace(old_text, new_text)
