@@ -1037,7 +1037,163 @@ async def timecyc(j):
     return output_file_path
 
 
-async def kvadratik(hex_color):
+def _sync_aitimecyc(description: str) -> dict:
+    prompt = f'Ты эксперт по настройке атмосферы в играх GTA SA. \nНа основе описания "{description}" придумай цветовую схему для timecyc.\nВерни ТОЛЬКО JSON без пояснений:\n{{\n  "SkyBottomRGB": [R, G, B],\n  "SkyTopRGB": [R, G, B],\n  "CloudRGB": [R, G, B],\n  "SunCoreRGB": [R, G, B],\n  "AmbientRGB": [R, G, B],\n  "DirectionalRGB": [R, G, B],\n  "FarClip": 700.0,\n  "FogStart": 100.0\n}}\nВсе значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400.'
+    completion = client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": "Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
+            {"role": "user", "content": prompt}
+        ],
+        model="llama-3.1-8b-instant",
+        temperature=0.7,
+    )
+    raw = completion.choices[0].message.content.strip()
+    match = re.search(r'\{[\s\S]*\}', raw)
+    if not match:
+        raise ValueError("AI не вернул валидный JSON")
+    return json.loads(match.group(0))
+
+
+async def aitimecyc(description: str):
+    """Generate timecyc colors via Groq AI based on text description."""
+    prompt = f"""Ты эксперт по настройке атмосферы в играх GTA SA. 
+На основе описания "{description}" придумай цветовую схему для timecyc.
+Верни ТОЛЬКО JSON без пояснений:
+{{
+  "SkyBottomRGB": [R, G, B],
+  "SkyTopRGB": [R, G, B],
+  "CloudRGB": [R, G, B],
+  "SunCoreRGB": [R, G, B],
+  "AmbientRGB": [R, G, B],
+  "DirectionalRGB": [R, G, B],
+  "FarClip": 700.0,
+  "FogStart": 100.0
+}}
+Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400."""
+    completion = client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": "Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
+            {"role": "user", "content": prompt}
+        ],
+        model="llama-3.1-8b-instant",
+        temperature=0.7,
+    )
+    raw = completion.choices[0].message.content.strip()
+    match = re.search(r'\{[\s\S]*\}', raw)
+    if not match:
+        raise ValueError("AI не вернул валидный JSON")
+    data = json.loads(match.group(0))
+    return data
+
+
+def generate_aitimecyc_json(ai_colors: dict) -> str:
+    """Build timecyc JSON from AI colors using main.json template."""
+    letters = string.ascii_lowercase
+    rand_string = ''.join(random.choice(letters) for _ in range(length))
+    output_file_path = f"{rand_string}_aitimecyc.json"
+    with open("main.json", "r", encoding='utf-8') as f:
+        timecyc_json_string = f.read()
+    sky_bottom = str(ai_colors["SkyBottomRGB"]).replace(" ", "")
+    sky_top = str(ai_colors["SkyTopRGB"]).replace(" ", "")
+    cloud = str(ai_colors["CloudRGB"]).replace(" ", "")
+    sun_core = str(ai_colors["SunCoreRGB"]).replace(" ", "")
+    replacements = [
+        ('"SkyBottomRGB":[SBR016]', f'"SkyBottomRGB":{sky_bottom}'),
+        ('"SkyTopRGB":[STR016]', f'"SkyTopRGB":{sky_top}'),
+        ('"CloudRGB":[CLR016]', f'"CloudRGB":{cloud}'),
+        ('"SunCoreRGB":[SCR016]', f'"SunCoreRGB":{sun_core}')
+    ]
+    for old_text, new_text in replacements:
+        timecyc_json_string = timecyc_json_string.replace(old_text, new_text)
+    with open(output_file_path, "w", encoding='utf-8') as f:
+        f.write(timecyc_json_string)
+    return output_file_path
+
+
+def generate_sky_preview(ai_colors: dict, description: str) -> str:
+    """Generate a preview image showing sky at noon in sunny weather."""
+    width, height = 800, 450
+    sky_top = tuple(ai_colors["SkyTopRGB"])
+    sky_bottom = tuple(ai_colors["SkyBottomRGB"])
+    cloud_color = tuple(ai_colors["CloudRGB"])
+    sun_color = tuple(ai_colors["SunCoreRGB"])
+
+    img = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(img)
+
+    # Sky gradient (top to bottom)
+    for y in range(height):
+        t = y / height
+        r = int(sky_top[0] * (1 - t) + sky_bottom[0] * t)
+        g = int(sky_top[1] * (1 - t) + sky_bottom[1] * t)
+        b = int(sky_top[2] * (1 - t) + sky_bottom[2] * t)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+    # Sun (noon — top center area)
+    sun_x, sun_y = width // 2, height // 5
+    sun_radius = 55
+    # Sun glow
+    for glow_r in range(sun_radius + 40, sun_radius - 1, -2):
+        alpha_ratio = (glow_r - sun_radius) / 40
+        glow_color = tuple(int(c + (255 - c) * (1 - alpha_ratio) * 0.3) for c in sun_color[:3])
+        draw.ellipse(
+            [sun_x - glow_r, sun_y - glow_r, sun_x + glow_r, sun_y + glow_r],
+            fill=glow_color
+        )
+    draw.ellipse(
+        [sun_x - sun_radius, sun_y - sun_radius, sun_x + sun_radius, sun_y + sun_radius],
+        fill=sun_color
+    )
+
+    # Clouds
+    import random as _rnd
+    _rnd.seed(42)
+    for _ in range(6):
+        cx = _rnd.randint(80, width - 80)
+        cy = _rnd.randint(height // 4, height * 2 // 3)
+        cw = _rnd.randint(80, 180)
+        ch = _rnd.randint(30, 70)
+        cloud_alpha_color = tuple(
+            min(255, int(c + (255 - c) * 0.6)) for c in cloud_color[:3]
+        )
+        draw.ellipse([cx - cw, cy - ch, cx + cw, cy + ch], fill=cloud_alpha_color)
+        draw.ellipse([cx - cw // 2, cy - ch - 20, cx + cw // 2, cy + ch - 10], fill=cloud_alpha_color)
+
+    # Ground strip
+    ground_color = tuple(int(c * 0.4) for c in sky_bottom)
+    draw.rectangle([0, height - 60, width, height], fill=ground_color)
+
+    # Labels
+    try:
+        font = ImageFont.truetype("arial.ttf", 16)
+        font_small = ImageFont.truetype("arial.ttf", 13)
+    except:
+        font = ImageFont.load_default()
+        font_small = font
+
+    draw.text((10, 10), f"🎨 AI TimeCyc Preview — 12:00 ☀️", fill=(255, 255, 255), font=font)
+    draw.text((10, 30), f"Описание: {description[:60]}", fill=(220, 220, 220), font=font_small)
+
+    # Color swatches at bottom
+    colors_info = [
+        ("SkyTop", sky_top),
+        ("SkyBot", sky_bottom),
+        ("Cloud", cloud_color),
+        ("Sun", sun_color),
+    ]
+    sw_x = 10
+    for label, color in colors_info:
+        draw.rectangle([sw_x, height - 55, sw_x + 40, height - 20], fill=color, outline=(255,255,255), width=1)
+        hex_c = '#{:02X}{:02X}{:02X}'.format(*color[:3])
+        draw.text((sw_x, height - 17), f"{label}", fill=(255, 255, 255), font=font_small)
+        sw_x += 95
+
+    rand_str = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
+    out_path = f"{rand_str}_sky_preview.png"
+    img.save(out_path)
+    return out_path
+
+
     FONT = ImageFont.truetype("arial.ttf", 24)
     img_width = 400
     img_height = 500
@@ -2070,32 +2226,49 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
     elif '/genrl' in caption:
         chat_id = message.chat.id
         document = message.document
-        if not document.file_name.lower().endswith('.bpc'):
-            await message.answer("Пожалуйста, загрузите файл с расширением .bpc.")
+        if not document.file_name.lower().endswith(('.bpc', '.zip')):
+            await message.answer("Пожалуйста, загрузите файл с расширением .bpc или .zip.")
             return
         y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
         work_dir = Path(f'work/work_BPC/{r}')
         await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
         file_name = message.document.file_name
         download_path = work_dir / file_name
-        await p_app.download_media(message.document.file_id, file_name=download_path)
-        generate_bpcmeta(f'work/work_BPC/{r}/{file_name}', f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
-        await y.delete()
-        await t_client.send_file(chat_id, f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta', caption=f'<b>⚡️Твой генрл готов!</b>',
-                                 parse_mode="HTML", force_document=True)
+        try:
+            await p_app.download_media(message.document.file_id, file_name=download_path)
+            # If bpc - decrypt to zip first
+            genrl_target = str(download_path)
+            if file_name.lower().endswith('.bpc'):
+                raw = read_file_bytes(str(download_path))
+                xor_key = detect_key_pattern(raw)
+                dec = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
+                genrl_zip_path = str(work_dir / (Path(file_name).stem + '_dec.zip'))
+                write_bytes_to_file(genrl_zip_path, dec)
+                genrl_target = genrl_zip_path
+            generate_bpcmeta(genrl_target, f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
+            await y.delete()
+            await t_client.send_file(chat_id, f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta',
+                                     caption=f'<b>⚡️Твой генрл готов!</b>',
+                                     parse_mode="HTML", force_document=True)
+        except Exception as e:
+            await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        return
     elif "/bpc" in caption:
         for id in loging_id:
             await boti.send_message(id,
-                                    f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
+                                    f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка bpc)")
         file_name = message.document.file_name
         temp_dir = os.path.join(f"work/work_BPC/{r}")
         os.makedirs(temp_dir, exist_ok=True)
         await p_app.download_media(message.document.file_id, file_name=f'work/work_BPC/{r}/{file_name}')
         await process_zip_file(file_name, message, r, temp_dir)
+        return
     elif "/nri" in caption:
         for id in loging_id:
             await boti.send_message(id,
-                                    f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
+                                    f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} /nri")
         y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
         file_name = message.document.file_name
         temp_dir = os.path.join(f"work/work_Z2N/{r}")
@@ -2107,6 +2280,80 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
         await t_client.send_file(message.chat.id, i, caption='<b>⚡️Твоя сборка готова!</b>',
                                  parse_mode="HTML", force_document=True)
         shutil.rmtree(temp_dir)
+        return
+    elif '/merger' in caption:
+        parts = caption.split()
+        if len(parts) < 2:
+            await message.answer("❔ Формат: /merger <имя_текстуры>\nПример: /merger mytexture")
+            return
+        target_name = parts[1]
+        if file_format not in ('zip', 'bpc'):
+            await message.answer("❔ Загрузите .zip или .bpc архив с нужными файлами.")
+            return
+        y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
+        work_dir = Path(f'work/work_BPC/{r}')
+        work_dir.mkdir(parents=True, exist_ok=True)
+        download_path = work_dir / file_name
+        try:
+            await p_app.download_media(message.document.file_id, file_name=download_path)
+            raw = read_file_bytes(str(download_path))
+            if file_format == 'bpc':
+                xor_key = detect_key_pattern(raw)
+                raw = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
+            with zipfile.ZipFile(io.BytesIO(bytes(raw)), 'r') as zf:
+                names_in_zip = [
+                    Path(n).stem
+                    for n in zf.namelist()
+                    if not n.endswith('/') and not n.startswith('__MACOSX')
+                ]
+            merger_data = {target_name: names_in_zip}
+            merger_path = work_dir / f'Merger_{r}.json'
+            with open(merger_path, 'w', encoding='utf-8') as f:
+                json.dump(merger_data, f, indent=4, ensure_ascii=False)
+            await y.delete()
+            await t_client.send_file(message.chat.id, str(merger_path),
+                                     caption=f'<b>⚡️Merger.json готов!</b>\n📄 Файлов в списке: {len(names_in_zip)}',
+                                     parse_mode="HTML", force_document=True)
+        except Exception as e:
+            await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        return
+    elif '/index' in caption:
+        if file_format not in ('zip', 'bpc'):
+            await message.answer("❔ Загрузите .zip или .bpc архив.")
+            return
+        y = await message.answer("⏳<b>Индексирую...</b>", parse_mode="HTML")
+        work_dir = Path(f'work/work_BPC/{r}')
+        work_dir.mkdir(parents=True, exist_ok=True)
+        download_path = work_dir / file_name
+        try:
+            await p_app.download_media(message.document.file_id, file_name=download_path)
+            raw = read_file_bytes(str(download_path))
+            if file_format == 'bpc':
+                xor_key = detect_key_pattern(raw)
+                raw = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
+            out_zip_buf = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(bytes(raw)), 'r') as zf_in:
+                with zipfile.ZipFile(out_zip_buf, 'w', zipfile.ZIP_STORED) as zf_out:
+                    for info in zf_in.infolist():
+                        if info.is_dir() or info.filename.startswith('__MACOSX'):
+                            continue
+                        data = zf_in.read(info.filename)
+                        truncated = data[:136]
+                        zf_out.writestr(info.filename, truncated)
+            out_zip_buf.seek(0)
+            out_name = Path(file_name).stem + '.tmb'
+            out_zip_buf.name = out_name
+            await y.delete()
+            await t_client.send_file(message.chat.id, out_zip_buf,
+                                     caption=f'<b>⚡️Индекс готов!</b>\n📦 {out_name}',
+                                     parse_mode="HTML", force_document=True)
+        except Exception as e:
+            await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        return
     elif '/ptk' in caption:
         chat_id = message.chat.id
         document = message.document
@@ -2121,6 +2368,7 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
         await t_client.send_file(chat_id, f'work/work_COLOR/{r}/palette.png', caption=f'<b>⚡️{o}</b>',
                                  parse_mode="HTML")
         shutil.rmtree(work_dir)
+        return
     elif '/overlay' in caption:
         if len(message.caption.split()) < 3:
             await message.answer(
@@ -2181,6 +2429,7 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
         await state.clear()
         return
     else:
+        # No caption command matched — handle by file format
         if file_format == "ifp":
             for id in loging_id:
                 await boti.send_message(id,
@@ -3134,6 +3383,43 @@ async def ok(message: types.Message):
         await y.delete()
         await t_client.send_file(user_id, f'Merger_{r}.json', caption=f'⚡<b>Ваш Merger.json </b>', parse_mode="HTML")
         os.remove(f'Merger_{r}.json')
+    elif "/aitimecyc" in message.text:
+        if len(message.text.split()) < 2:
+            await message.answer(
+                "❔ Формат: /aitimecyc <описание>\n\nПример: /aitimecyc закат с алыми облаками и туманом\nИли: /aitimecyc ночь с синим небом\n\nБот сгенерирует timecyc.json и превью картинку неба.")
+            return
+        description = message.text.replace("/aitimecyc", "", 1).strip()
+        y = await message.answer("🤖 <b>Генерирую таймсус...</b>", parse_mode="HTML")
+        try:
+            loop = asyncio.get_running_loop()
+            ai_colors = await loop.run_in_executor(None, _sync_aitimecyc, description)
+            json_path = await asyncio.to_thread(generate_aitimecyc_json, ai_colors)
+            preview_path = await asyncio.to_thread(generate_sky_preview, ai_colors, description)
+            sky_top_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SkyTopRGB"])
+            sky_bot_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SkyBottomRGB"])
+            cloud_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["CloudRGB"])
+            sun_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SunCoreRGB"])
+            user_id = message.from_user.id
+            await y.delete()
+            await t_client.send_file(
+                user_id, preview_path,
+                caption=(
+                    f"🎨 <b>AI TimeCyc по описанию:</b>\n<i>{description}</i>\n\n"
+                    f"🌅 SkyTop: <code>{sky_top_hex}</code>\n"
+                    f"🌄 SkyBottom: <code>{sky_bot_hex}</code>\n"
+                    f"☁️ Cloud: <code>{cloud_hex}</code>\n"
+                    f"☀️ Sun: <code>{sun_hex}</code>"
+                ),
+                parse_mode="HTML", force_document=False
+            )
+            await t_client.send_file(
+                user_id, json_path,
+                caption='<b>⚡️ timecyc.json готов!</b>', parse_mode="HTML", force_document=True
+            )
+            os.remove(json_path)
+            os.remove(preview_path)
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
     elif "/aicolor" in message.text:
         if len(message.text.split()) < 2:
             await message.answer(
@@ -3202,6 +3488,9 @@ async def ok(message: types.Message):
 /genrl - создание кастом звуков бр
 /bpc - шифровка bpc
 /nri - сборки с neizzir на nonerai
+/merger - merger из файлов в zip
+/index - индексация zip → .tmb
+/aitimecyc - ИИ генерация TimeCycle по описанию
 
 <b>🧰 Копирование:</b>
 /logo - Копирование Логотипов
