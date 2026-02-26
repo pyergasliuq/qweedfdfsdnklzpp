@@ -228,7 +228,7 @@ def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
         final.convert("RGBA").save(img_byte_arr, format='PNG')
     return img_byte_arr.getvalue()
 
-  async def kvadratik(hex_color):
+async def kvadratik(hex_color):
     FONT = ImageFont.truetype("arial.ttf", 24)
     img_width = 400
     img_height = 500
