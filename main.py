@@ -228,32 +228,6 @@ def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
         final.convert("RGBA").save(img_byte_arr, format='PNG')
     return img_byte_arr.getvalue()
 
-async def kvadratik(hex_color):
-    FONT = ImageFont.truetype("arial.ttf", 24)
-    img_width = 400
-    img_height = 500
-    background_color_rgb = (128, 128, 128)
-    image = Image.new("RGB", (img_width, img_height), background_color_rgb)
-    draw = ImageDraw.Draw(image)
-    rect_width = 200
-    rect_height = 200
-    rect_x = (img_width - rect_width) // 2
-    rect_y = 150
-    radius = 20
-    hex_color_val = hex_color.lstrip('#')
-    rgb_color = tuple(int(hex_color_val[i:i + 2], 16) for i in (0, 2, 4))
-    draw.rounded_rectangle([(rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height)], radius, fill=rgb_color,
-                           outline=(0, 0, 0), width=2)
-    text = hex_color
-    text_color = (0, 0, 0) if sum(rgb_color) > 384 else (255, 255, 255)
-    bbox = draw.textbbox((0, 0), text, font=FONT)
-    text_width = bbox[2] - bbox[0]
-    text_x = (img_width - text_width) // 2
-    text_y = rect_y + rect_height + 20
-    draw.text((text_x, text_y), text, font=FONT, fill=text_color)
-    image_path = f"color_image_{hex_color.replace('#', '')}.png"
-    image.save(image_path)
-    return image_path
 
 def _process_zip_overlay(zip_path, overlay_img_path, mode, alpha_pct):
     import zipfile
@@ -397,6 +371,7 @@ def compute_data_offset(zip_path, header_offset):
         n = struct.unpack('<H', f.read(2))[0]
         m = struct.unpack('<H', f.read(2))[0]
         return header_offset + 30 + n + m
+
 
 
 def generate_bpcmeta(zip_path_str, output_path_str):
@@ -1064,7 +1039,21 @@ async def timecyc(j):
 
 
 def _sync_aitimecyc(description: str) -> dict:
-    prompt = f'Ты эксперт по настройке атмосферы в играх GTA SA. \nНа основе описания "{description}" придумай цветовую схему для timecyc.\nВерни ТОЛЬКО JSON без пояснений:\n{{\n  "SkyBottomRGB": [R, G, B],\n  "SkyTopRGB": [R, G, B],\n  "CloudRGB": [R, G, B],\n  "SunCoreRGB": [R, G, B],\n  "AmbientRGB": [R, G, B],\n  "DirectionalRGB": [R, G, B],\n  "FarClip": 700.0,\n  "FogStart": 100.0\n}}\nВсе значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400.'
+    """Synchronous wrapper to call Groq for timecyc colors."""
+    prompt = f"""Ты эксперт по настройке атмосферы в играх GTA SA. 
+На основе описания "{description}" придумай цветовую схему для timecyc.
+Верни ТОЛЬКО JSON без пояснений:
+{{
+  "SkyBottomRGB": [R, G, B],
+  "SkyTopRGB": [R, G, B],
+  "CloudRGB": [R, G, B],
+  "SunCoreRGB": [R, G, B],
+  "AmbientRGB": [R, G, B],
+  "DirectionalRGB": [R, G, B],
+  "FarClip": 700.0,
+  "FogStart": 100.0
+}}
+Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400."""
     completion = client.chat.completions.create(
         messages=[
             {"role": "system", "content": "Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
@@ -1081,7 +1070,21 @@ def _sync_aitimecyc(description: str) -> dict:
 
 
 async def aitimecyc(description: str):
-    prompt = f'Ты эксперт по настройке атмосферы в играх GTA SA. \nНа основе описания "{description}" придумай цветовую схему для timecyc.\nВерни ТОЛЬКО JSON без пояснений:\n{{\n  "SkyBottomRGB": [R, G, B],\n  "SkyTopRGB": [R, G, B],\n  "CloudRGB": [R, G, B],\n  "SunCoreRGB": [R, G, B],\n  "AmbientRGB": [R, G, B],\n  "DirectionalRGB": [R, G, B],\n  "FarClip": 700.0,\n  "FogStart": 100.0\n}}\nВсе значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400.'
+    """Generate timecyc colors via Groq AI based on text description."""
+    prompt = f"""Ты эксперт по настройке атмосферы в играх GTA SA. 
+На основе описания "{description}" придумай цветовую схему для timecyc.
+Верни ТОЛЬКО JSON без пояснений:
+{{
+  "SkyBottomRGB": [R, G, B],
+  "SkyTopRGB": [R, G, B],
+  "CloudRGB": [R, G, B],
+  "SunCoreRGB": [R, G, B],
+  "AmbientRGB": [R, G, B],
+  "DirectionalRGB": [R, G, B],
+  "FarClip": 700.0,
+  "FogStart": 100.0
+}}
+Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400."""
     completion = client.chat.completions.create(
         messages=[
             {"role": "system", "content": "Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
@@ -2237,31 +2240,30 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
                                  parse_mode=enums.ParseMode.HTML, force_document=True)
     elif '/genrl' in caption:
         chat_id = message.chat.id
-        document = message.document
-        if not document.file_name.lower().endswith(('.bpc', '.zip')):
-            await message.answer("Пожалуйста, загрузите файл с расширением .bpc или .zip.")
-            return
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
         work_dir = Path(f'work/work_BPC/{r}')
-        await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        y = await message.answer("<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
         file_name = message.document.file_name
         download_path = work_dir / file_name
+        bpcmeta_path = work_dir / f'{r}_GENERIC.bpcmeta'
         try:
-            await p_app.download_media(message.document.file_id, file_name=download_path)
-            # If bpc - decrypt to zip first
+            await p_app.download_media(message.document.file_id, file_name=str(download_path))
+            # Determine zip target: use as-is if valid zip, else try XOR decrypt
             genrl_target = str(download_path)
-            if file_name.lower().endswith('.bpc'):
+            if not zipfile.is_zipfile(str(download_path)):
                 raw = read_file_bytes(str(download_path))
                 xor_key = detect_key_pattern(raw)
                 dec = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
-                genrl_zip_path = str(work_dir / (Path(file_name).stem + '_dec.zip'))
-                write_bytes_to_file(genrl_zip_path, dec)
-                genrl_target = genrl_zip_path
-            generate_bpcmeta(genrl_target, f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta')
+                dec_path = work_dir / (Path(file_name).stem + '_dec.zip')
+                dec_path.write_bytes(bytes(dec))
+                if not zipfile.is_zipfile(str(dec_path)):
+                    raise ValueError("Файл не является zip-архивом и не удалось расшифровать.")
+                genrl_target = str(dec_path)
+            generate_bpcmeta(genrl_target, str(bpcmeta_path))
             await y.delete()
-            await t_client.send_file(chat_id, f'work/work_BPC/{r}/{r}_GENERIC.bpcmeta',
-                                     caption=f'<b>⚡️Твой генрл готов!</b>',
-                                     parse_mode="HTML", force_document=True)
+            await t_client.send_file(chat_id, str(bpcmeta_path),
+                                     caption='<b>⚡️Твой генрл готов!</b>',
+                                     parse_mode='html', force_document=True)
         except Exception as e:
             await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
         finally:
