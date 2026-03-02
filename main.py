@@ -29,7 +29,7 @@ from skimage import exposure
 from skimage.filters import threshold_otsu
 from scipy.ndimage import gaussian_filter
 from pyrogram import Client, enums
-from telethon import TelegramClient
+from telethon import TelegramClient, events, Button
 from groq import Groq
 import colorsys
 from sklearn.cluster import KMeans
@@ -119,6 +119,52 @@ bild = ['reclam65', 'reclam66', 'Billb_SanVice', 'BLBRD_3_889', 'reclam67', 'BLB
         'Billb_GTABer', 'reclam68', 'BLBRD_6_889', 'reclam62', 'Billb_GostownParadise', 'reclam63', 'Billb_YouAreHere',
         'bilb_sign2', 'Billb_GTAUnited', 'BLBRD_4_889', 'BLBRD_2_889']
 
+PRESETS = {
+    "1": {"name": "⚡ Ускор + Антик", "folder": "weapon_templates/preset1", "desc": "Ускоренная стрельба, антикилл, раскрывающийся прицел"},
+    "2": {"name": "🔄 Без перезарядки + Динамичный", "folder": "weapon_templates/preset2", "desc": "Без перезарядки, динамичный прицел"},
+    "3": {"name": "🎯 Без перезарядки + Статичный", "folder": "weapon_templates/preset3", "desc": "Без перезарядки, статичный прицел"},
+}
+weapon_user_settings: dict[int, str] = {}
+
+def apply_weapon_params(folder: str, PT: int, RAZB: int):
+    wj_path = os.path.join(folder, "weapon.json")
+    if os.path.exists(wj_path):
+        with open(wj_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for weapon in data.get("weapons", []):
+            if weapon.get("uniqueName") == "DESERT_EAGLE":
+                weapon["ammo"] = PT
+                weapon["accuracy"] = RAZB
+                break
+        with open(wj_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    wo_path = os.path.join(folder, "weapon_overrides.json")
+    if os.path.exists(wo_path):
+        with open(wo_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "DESERT_EAGLE" in data.get("weapons", {}):
+            data["weapons"]["DESERT_EAGLE"]["ammo"] = PT
+            data["weapons"]["DESERT_EAGLE"]["accuracy"] = RAZB
+        with open(wo_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    wp_path = os.path.join(folder, "weapon_presets.json")
+    if os.path.exists(wp_path):
+        with open(wp_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "DESERT_EAGLE" in data.get("antiSpreadStaticAim", {}):
+            data["antiSpreadStaticAim"]["DESERT_EAGLE"]["accuracy"] = RAZB
+        if "DESERT_EAGLE" in data.get("antiReload", {}):
+            data["antiReload"]["DESERT_EAGLE"] = PT
+        with open(wp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+
+def build_weapon_zip(tmp_folder: str, zip_path: str):
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(tmp_folder):
+            zf.write(os.path.join(tmp_folder, fname), fname)
 
 class OverlayStates(StatesGroup):
     waiting_for_second_image = State()
@@ -3224,67 +3270,107 @@ async def ok(message: types.Message):
     elif "/checkcolor" in message.text and len(message.text.split()) < 2:
         await message.answer(
             "❔ Неверный формат данных. Используйте: /checkcolor <color>\n\nПример использования: /checkcolor #FF0000")
-    elif "/weather" in message.text and len(message.text.split()) >= 2:
-        y = await message.answer("Обрабатываю...")
-        id = j[1]
-        with open('weather.json', 'r') as f:
-            template_data = f.read()
-        final_data = template_data.replace("ID", id)
-        name = "mapzones.json"
-        with open(name, 'w') as f:
-            f.write(final_data)
-        user_id = message.from_user.id
-        await y.delete()
-        await t_client.send_file(user_id, name, caption='⚡️<b>Держите погоду!</b>',
-                                 parse_mode="HTML", force_document=True)
-        os.remove(name)
-    elif "/weather" in message.text and len(message.text.split()) < 2:
-        await message.answer(
-            "❔ Неверный формат данных. Используйте: /weather <ID>\n\nПример использования: /weather 2\n\n⭐️ Список айди погоды:\n2 = дождь\n8 = гроза\n9 = густой туман и пасмурно\n10 = ясное небо\n11 = дикое пекло\n12 - 15 = смуглая и неприятная погода\n16 = тусклая и дождливая\n17 - 18 = жара\n19 = песчаная буря\n20 = туманная погода\n21 = ночь с пурпурным небом\n22 = ночь с зеленоватым небом\n23 - 26 = изменения бледного апельсина\n27 - 29 = изменения свежий синие\n30 - 32 = изменения темного, неясного, чирка\n33 = вечер в коричневатых оттенках\n34 = погода с синими/пурпурными оттенками\n35 = тусклая и унылая погода в коричневых тонах\n36 - 38 = яркая и туманная погода в тонах апельсина\n39 = очень яркая погода\n40 - 42 = неясная погода в пурпурных/синих цветах\n43 = тёмные и едкие облака\n44 = чёрно-белое небо\n45 = пурпурное небо")
-    elif '/particle' in message.text and len(message.text.split()) >= 2:
-        try:
-            user = message.from_user.id
-            y = await message.answer("Обрабатываю...")
-            j = message.text.split()
-            if len(j) < 3:
-                await bot.send_message(user, "Неверный формат команды. Используйте: /particle <цвет> <размер>")
-                return
-            rgb = ImageColor.getrgb(j[1])
-            if len(j) < 2:
-                await bot.send_message(user,
-                                       "Неверный формат команды. Используйте: /particle <цвет> <размер> <время> <гравитация> <разброс>")
-                return
-            r, g, b = map(str, rgb)
-            q = "some_unique_q_value"
-            r_value = "some_unique_r_value"
-            work_dir = Path(f'work/work_BLOOD/{q}')
-            work_dir.mkdir(parents=True, exist_ok=True)
-            grn1_path = work_dir / f'{r_value}_particle.cfg'
-            with open('particleCH.cfg', 'r') as infile:
-                t = infile.read()
-            t = t.replace("r22", r) \
-                .replace("g22", g) \
-                .replace("b22", b)
-            if len(j) > 2:
-                raz = j[2]
-                time = j[3]
-                grav = j[4]
-                rzbros = j[5]
-                t = t.replace("Q11", raz) \
-                    .replace("U11", grav) \
-                    .replace("R11", rzbros) \
-                    .replace("T11", time)
-            with open(grn1_path, 'w') as outfile:
-                outfile.write(t)
-            await y.delete()
-            await t_client.send_file(user, grn1_path, caption='⚡️ Ваш particle.cfg готов!')
-        except (ValueError, IndexError) as e:
-            await bot.send_message(user, f"Ошибка при обработке параметров цвета или команды: {e}")
-        except Exception as e:
-            await bot.send_message(user, f"Произошла непредвиденная ошибка: {e}")
-        finally:
-            if 'work_dir' in locals() and work_dir.exists():
-                shutil.rmtree(work_dir)
+    elif '/wpr' in message.text.split():
+      preset_arg = j[1]
+      if preset_arg not in PRESETS:
+          await message.answer(
+              "❔ Неверный пресет. Доступные:\n\n"
+              "1 — ⚡ Ускор + Антик\n"
+              "2 — 🔄 Без перезарядки + Динамичный прицел\n"
+              "3 — 🎯 Без перезарядки + Статичный прицел\n\n"
+              "Пример: /weapon 2\n"
+              "Затем: /weapon <PT> <RAZB>"
+          )
+          return
+      weapon_user_settings[user_id] = preset_arg
+      preset = PRESETS[preset_arg]
+      await message.answer(f"✅ <b>Пресет weapon сохранён</b>\n"
+          f"🗂 {preset['name']}\n"
+          f"📄 {preset['desc']}\n\n"
+          f"Теперь отправь <b>/weapon &lt;PT&gt; &lt;RAZB&gt;</b> для генерации.", parse_mode="HTML")
+  elif '/weapon' in message.text.split() and len(j) >= 3:
+      try:
+          PT = int(j[1])
+          RAZB = int(j[2])
+      except (ValueError, IndexError):
+          await message.answer("❌ PT и RAZB должны быть числами.\nПример: /weapon 9 50")
+          return
+  
+      preset_id = weapon_user_settings.get(user_id, "1")
+      preset = PRESETS[preset_id]
+  
+      y = await message.answer("⏳ Обрабатываю...")
+      n = generate_random_string(8)
+      tmp_folder = f"work/work_weapon/{n}"
+      zip_path = f"work/work_weapon/{n}.zip"
+      try:
+          os.makedirs("work/work_weapon", exist_ok=True)
+          shutil.copytree(preset["folder"], tmp_folder)
+          apply_weapon_params(tmp_folder, PT, RAZB)
+          build_weapon_zip(tmp_folder, zip_path)
+          await y.delete()
+          await bot.send_document(
+              message.chat.id,
+              FSInputFile(zip_path),
+              caption=(
+                  f"🔫 <b>Weapon готов!</b>\n\n"
+                  f"📦 Патроны: <b>{PT}</b>\n"
+                  f"🎯 Разброс: <b>{RAZB}</b>\n"
+                  f"🗂 Пресет: {preset['name']}\n"
+                  f"📄 {preset['desc']}"
+              ),
+              parse_mode="HTML"
+          )
+      except Exception as e:
+          await y.edit_text(f"❌ Ошибка: {e}")
+      finally:
+          shutil.rmtree(tmp_folder, ignore_errors=True)
+          if os.path.exists(zip_path):
+              os.remove(zip_path)
+      elif '/particle' in message.text and len(message.text.split()) >= 2:
+          try:
+              user = message.from_user.id
+              y = await message.answer("Обрабатываю...")
+              j = message.text.split()
+              if len(j) < 3:
+                  await bot.send_message(user, "Неверный формат команды. Используйте: /particle <цвет> <размер>")
+                  return
+              rgb = ImageColor.getrgb(j[1])
+              if len(j) < 2:
+                  await bot.send_message(user,
+                                         "Неверный формат команды. Используйте: /particle <цвет> <размер> <время> <гравитация> <разброс>")
+                  return
+              r, g, b = map(str, rgb)
+              q = "some_unique_q_value"
+              r_value = "some_unique_r_value"
+              work_dir = Path(f'work/work_BLOOD/{q}')
+              work_dir.mkdir(parents=True, exist_ok=True)
+              grn1_path = work_dir / f'{r_value}_particle.cfg'
+              with open('particleCH.cfg', 'r') as infile:
+                  t = infile.read()
+              t = t.replace("r22", r) \
+                  .replace("g22", g) \
+                  .replace("b22", b)
+              if len(j) > 2:
+                  raz = j[2]
+                  time = j[3]
+                  grav = j[4]
+                  rzbros = j[5]
+                  t = t.replace("Q11", raz) \
+                      .replace("U11", grav) \
+                      .replace("R11", rzbros) \
+                      .replace("T11", time)
+              with open(grn1_path, 'w') as outfile:
+                  outfile.write(t)
+              await y.delete()
+              await t_client.send_file(user, grn1_path, caption='⚡️ Ваш particle.cfg готов!')
+          except (ValueError, IndexError) as e:
+              await bot.send_message(user, f"Ошибка при обработке параметров цвета или команды: {e}")
+          except Exception as e:
+              await bot.send_message(user, f"Произошла непредвиденная ошибка: {e}")
+          finally:
+              if 'work_dir' in locals() and work_dir.exists():
+                  shutil.rmtree(work_dir)
     elif '/btx' in message.text.split():
         parts = message.text.strip().split()
         block_arg   = parts[1].lower() if len(parts) > 1 else None
@@ -3527,6 +3613,7 @@ async def ok(message: types.Message):
 /compress - Сжатие веса
 /search - Получить название из ID и наоборот(cкин)
 /btx - настройка сжатия
+/wpr - настройка веапона
 
 <b>📁 Автоматически:</b>
 <i><b>файл.btx/.png/.jpg/.zip</b></i> - обработка BTX,PNG,JPG
