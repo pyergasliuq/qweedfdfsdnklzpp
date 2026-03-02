@@ -3176,7 +3176,7 @@ async def ok(message: types.Message):
             RAZB = int(j[2])
         except (ValueError, IndexError):
             await y.delete()
-            await message.answer("Неверный формат данных. Используйте: /pistol <PT> <RAZB>")
+            await message.answer("Неверный формат данных. Используйте: /weapon <PT> <RAZB>")
         with open("weapon.isx", "r") as file:
             dg = file.read()
             dg = dg.replace("ПТ", str(PT))
