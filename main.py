@@ -3302,49 +3302,49 @@ async def ok(message: types.Message):
             if os.path.exists(zip_path):
                 os.remove(zip_path)
     elif '/particle' in message.text and len(message.text.split()) >= 2:
-          try:
-              user = message.from_user.id
-              y = await message.answer("Обрабатываю...")
-              j = message.text.split()
-              if len(j) < 3:
-                  await bot.send_message(user, "Неверный формат команды. Используйте: /particle <цвет> <размер>")
-                  return
-              rgb = ImageColor.getrgb(j[1])
-              if len(j) < 2:
-                  await bot.send_message(user,
-                                         "Неверный формат команды. Используйте: /particle <цвет> <размер> <время> <гравитация> <разброс>")
-                  return
-              r, g, b = map(str, rgb)
-              q = "some_unique_q_value"
-              r_value = "some_unique_r_value"
-              work_dir = Path(f'work/work_BLOOD/{q}')
-              work_dir.mkdir(parents=True, exist_ok=True)
-              grn1_path = work_dir / f'{r_value}_particle.cfg'
-              with open('particleCH.cfg', 'r') as infile:
-                  t = infile.read()
-              t = t.replace("r22", r) \
-                  .replace("g22", g) \
-                  .replace("b22", b)
-              if len(j) > 2:
-                  raz = j[2]
-                  time = j[3]
-                  grav = j[4]
-                  rzbros = j[5]
-                  t = t.replace("Q11", raz) \
-                      .replace("U11", grav) \
-                      .replace("R11", rzbros) \
-                      .replace("T11", time)
-              with open(grn1_path, 'w') as outfile:
-                  outfile.write(t)
-              await y.delete()
-              await t_client.send_file(user, grn1_path, caption='⚡️ Ваш particle.cfg готов!')
-          except (ValueError, IndexError) as e:
-              await bot.send_message(user, f"Ошибка при обработке параметров цвета или команды: {e}")
-          except Exception as e:
-              await bot.send_message(user, f"Произошла непредвиденная ошибка: {e}")
-          finally:
-              if 'work_dir' in locals() and work_dir.exists():
-                  shutil.rmtree(work_dir)
+      try:
+          user = message.from_user.id
+          y = await message.answer("Обрабатываю...")
+          j = message.text.split()
+          if len(j) < 3:
+              await bot.send_message(user, "Неверный формат команды. Используйте: /particle <цвет> <размер>")
+              return
+          rgb = ImageColor.getrgb(j[1])
+          if len(j) < 2:
+              await bot.send_message(user,
+                                     "Неверный формат команды. Используйте: /particle <цвет> <размер> <время> <гравитация> <разброс>")
+              return
+          r, g, b = map(str, rgb)
+          q = "some_unique_q_value"
+          r_value = "some_unique_r_value"
+          work_dir = Path(f'work/work_BLOOD/{q}')
+          work_dir.mkdir(parents=True, exist_ok=True)
+          grn1_path = work_dir / f'{r_value}_particle.cfg'
+          with open('particleCH.cfg', 'r') as infile:
+              t = infile.read()
+          t = t.replace("r22", r) \
+              .replace("g22", g) \
+              .replace("b22", b)
+          if len(j) > 2:
+              raz = j[2]
+              time = j[3]
+              grav = j[4]
+              rzbros = j[5]
+              t = t.replace("Q11", raz) \
+                  .replace("U11", grav) \
+                  .replace("R11", rzbros) \
+                  .replace("T11", time)
+          with open(grn1_path, 'w') as outfile:
+              outfile.write(t)
+          await y.delete()
+          await t_client.send_file(user, grn1_path, caption='⚡️ Ваш particle.cfg готов!')
+      except (ValueError, IndexError) as e:
+          await bot.send_message(user, f"Ошибка при обработке параметров цвета или команды: {e}")
+      except Exception as e:
+          await bot.send_message(user, f"Произошла непредвиденная ошибка: {e}")
+      finally:
+          if 'work_dir' in locals() and work_dir.exists():
+              shutil.rmtree(work_dir)
     elif '/btx' in message.text.split():
         parts = message.text.strip().split()
         block_arg   = parts[1].lower() if len(parts) > 1 else None
