@@ -1464,7 +1464,7 @@ async def setup_work_dirs():
                  'work/work_LOGO/', 'work/work_TREE/', 'work/work_COLOR/',
                  'work/work_BTX/', 'work/work_TXD/', 'work/work_BPC/',
                  'work/work_HUD/', 'work/work_ANI/', 'work/work_COMPRESS', 'work/work_COL', 'work/work_MOD',
-                 'work/work_Z2N', "work/work_OVERLAY"]
+                 'work/work_Z2N', "work/work_OVERLAY", "work/work_weapons"]
     for d in work_dirs:
         os.makedirs(d, exist_ok=True)
 
