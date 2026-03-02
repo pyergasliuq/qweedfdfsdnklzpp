@@ -3167,28 +3167,30 @@ async def ok(message: types.Message):
         await message.answer(
             "❔ Пример использования: /timecyc SkyBottomRGB SkyTopRGB SunCoreRGB CloudRGB\nЗначение цветов /timecyc #НизНеба #ВерхНеба #Облака #Солнце\nВсе цвета должны быть в HEX(например, #RRGGBB)!")
     elif "/weapon" in message.text and len(message.text.split()) >= 3:
-        y = await message.answer("Обрабатываю...")
-        letters = string.ascii_lowercase
-        rand_string = ''.join(random.choice(letters) for i in range(length))
-        n = rand_string
-        try:
-            PT = int(j[1])
-            RAZB = int(j[2])
-        except (ValueError, IndexError):
-            await y.delete()
-            await message.answer("Неверный формат данных. Используйте: /weapon <PT> <RAZB>")
-        with open("weapon.isx", "r") as file:
-            dg = file.read()
-            dg = dg.replace("ПТ", str(PT))
-            dg = dg.replace("RAZB", str(RAZB))
-            output_file_name = f"{n}_weapon.dat"
-        with open(output_file_name, "w") as file:
-            file.write(dg)
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_file_name,
-                                 caption=f"<b>Держи weapon⚡</b>\nКоличество патрон в магазине: {PT}\nРазброс патрон: {RAZB}",
-                                 parse_mode="HTML", force_document=True)
-        os.remove(output_file_name)
+      y = await message.answer("Обрабатываю...")
+      letters = string.ascii_lowercase
+      rand_string = ''.join(random.choice(letters) for i in range(length))
+      n = rand_string
+      try:
+          PT = int(j[1])
+          RAZB = int(j[2])
+      except (ValueError, IndexError):
+          await y.delete()
+          await message.answer("Неверный формат данных. Используйте: /weapon <PT> <RAZB>")
+          return  # ← добавь return чтобы выйти после ошибки
+      with open("weapon.json", "r", encoding="utf-8") as file:
+          data = json.load(file)
+      for weapon in data["weapons"]:
+          if weapon["uniqueName"] == "DESERT_EAGLE":
+              weapon["ammo"] = PT      # ← было "ПТ" в isx
+              weapon["accuracy"] = RAZB  # ← было "RAZB" в isx
+              break
+      output_file_name = f"{n}_weapon.json"
+      with open(output_file_name, "w", encoding="utf-8") as file:
+          json.dump(data, file, ensure_ascii=False, indent=2)
+      await y.delete()
+      await t_client.send_file(message.chat.id, output_file_name, caption=f"<b>Держи weapon⚡</b>\nКоличество патрон в магазине: {PT}\nРазброс патрон: {RAZB}", parse_mode="HTML", force_document=True)
+      os.remove(output_file_name)
     elif "/weapon" in message.text and len(message.text.split()) < 3:
         await message.answer(
             "❔ Неверный формат данных. Используйте: /pistol <PT> <RAZB>\n\nПример использования: /weapon 9 50")
