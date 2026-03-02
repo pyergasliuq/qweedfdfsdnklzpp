@@ -120,10 +120,10 @@ bild = ['reclam65', 'reclam66', 'Billb_SanVice', 'BLBRD_3_889', 'reclam67', 'BLB
         'bilb_sign2', 'Billb_GTAUnited', 'BLBRD_4_889', 'BLBRD_2_889']
 
 PRESETS = {
-    "1": {"name": "Стандарт", "folder": "weapons/preset1", "desc": "Стандартный веапон"},
-    "2": {"name": "⚡ Ускор + Антик", "folder": "weapons/preset2", "desc": "Ускоренная стрельба, антикилл, раскрывающийся прицел"},
-    "3": {"name": "🔄 Без перезарядки + Динамичный", "folder": "weapons/preset3", "desc": "Без перезарядки, динамичный прицел"},
-    "4": {"name": "🎯 Без перезарядки + Статичный", "folder": "weapons/preset4", "desc": "Без перезарядки, статичный прицел"},
+    "1": {"name": "Стандарт", "folder": "weapons/presest1", "desc": "Стандартный веапон"},
+    "2": {"name": "⚡ Ускор + Антик", "folder": "weapons/presest2", "desc": "Ускоренная стрельба, антикилл, раскрывающийся прицел"},
+    "3": {"name": "🔄 Без перезарядки + Динамичный", "folder": "weapons/presest3", "desc": "Без перезарядки, динамичный прицел"},
+    "4": {"name": "🎯 Без перезарядки + Статичный", "folder": "weapons/presest4", "desc": "Без перезарядки, статичный прицел"},
 }
 weapon_user_settings: dict[int, str] = {}
 
