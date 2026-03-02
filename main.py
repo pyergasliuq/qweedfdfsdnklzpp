@@ -3290,45 +3290,45 @@ async def ok(message: types.Message):
           f"🗂 {preset['name']}\n"
           f"📄 {preset['desc']}\n\n"
           f"Теперь отправь <b>/weapon &lt;PT&gt; &lt;RAZB&gt;</b> для генерации.", parse_mode="HTML")
-  elif '/weapon' in message.text.split() and len(j) >= 3:
-      try:
-          PT = int(j[1])
-          RAZB = int(j[2])
-      except (ValueError, IndexError):
-          await message.answer("❌ PT и RAZB должны быть числами.\nПример: /weapon 9 50")
-          return
-  
-      preset_id = weapon_user_settings.get(user_id, "1")
-      preset = PRESETS[preset_id]
-  
-      y = await message.answer("⏳ Обрабатываю...")
-      n = generate_random_string(8)
-      tmp_folder = f"work/work_weapon/{n}"
-      zip_path = f"work/work_weapon/{n}.zip"
-      try:
-          os.makedirs("work/work_weapon", exist_ok=True)
-          shutil.copytree(preset["folder"], tmp_folder)
-          apply_weapon_params(tmp_folder, PT, RAZB)
-          build_weapon_zip(tmp_folder, zip_path)
-          await y.delete()
-          await bot.send_document(
-              message.chat.id,
-              FSInputFile(zip_path),
-              caption=(
-                  f"🔫 <b>Weapon готов!</b>\n\n"
-                  f"📦 Патроны: <b>{PT}</b>\n"
-                  f"🎯 Разброс: <b>{RAZB}</b>\n"
-                  f"🗂 Пресет: {preset['name']}\n"
-                  f"📄 {preset['desc']}"
-              ),
-              parse_mode="HTML"
-          )
-      except Exception as e:
-          await y.edit_text(f"❌ Ошибка: {e}")
-      finally:
-          shutil.rmtree(tmp_folder, ignore_errors=True)
-          if os.path.exists(zip_path):
-              os.remove(zip_path)
+    elif '/weapon' in message.text.split() and len(j) >= 3:
+        try:
+            PT = int(j[1])
+            RAZB = int(j[2])
+        except (ValueError, IndexError):
+            await message.answer("❌ PT и RAZB должны быть числами.\nПример: /weapon 9 50")
+            return
+    
+        preset_id = weapon_user_settings.get(user_id, "1")
+        preset = PRESETS[preset_id]
+    
+        y = await message.answer("⏳ Обрабатываю...")
+        n = generate_random_string(8)
+        tmp_folder = f"work/work_weapon/{n}"
+        zip_path = f"work/work_weapon/{n}.zip"
+        try:
+            os.makedirs("work/work_weapon", exist_ok=True)
+            shutil.copytree(preset["folder"], tmp_folder)
+            apply_weapon_params(tmp_folder, PT, RAZB)
+            build_weapon_zip(tmp_folder, zip_path)
+            await y.delete()
+            await bot.send_document(
+                message.chat.id,
+                FSInputFile(zip_path),
+                caption=(
+                    f"🔫 <b>Weapon готов!</b>\n\n"
+                    f"📦 Патроны: <b>{PT}</b>\n"
+                    f"🎯 Разброс: <b>{RAZB}</b>\n"
+                    f"🗂 Пресет: {preset['name']}\n"
+                    f"📄 {preset['desc']}"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await y.edit_text(f"❌ Ошибка: {e}")
+        finally:
+            shutil.rmtree(tmp_folder, ignore_errors=True)
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
       elif '/particle' in message.text and len(message.text.split()) >= 2:
           try:
               user = message.from_user.id
