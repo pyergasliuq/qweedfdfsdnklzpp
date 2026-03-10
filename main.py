@@ -2381,7 +2381,7 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
             shutil.rmtree(work_dir, ignore_errors=True)
         return
     elif '/index' in caption:
-        if file_format not in ('zip', 'bpc'):
+        if file_format not in ['zip', 'bpc']:
             await message.answer("❔ Загрузите .zip или .bpc архив.")
             return
         y = await message.answer("⏳<b>Индексирую...</b>", parse_mode="HTML")
@@ -2391,9 +2391,6 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
         try:
             await p_app.download_media(message.document.file_id, file_name=download_path)
             raw = read_file_bytes(str(download_path))
-            if file_format == 'bpc':
-                xor_key = detect_key_pattern(raw)
-                raw = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
             out_zip_buf = io.BytesIO()
             with zipfile.ZipFile(io.BytesIO(bytes(raw)), 'r') as zf_in:
                 with zipfile.ZipFile(out_zip_buf, 'w', zipfile.ZIP_STORED) as zf_out:
