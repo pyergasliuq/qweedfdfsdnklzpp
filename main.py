@@ -2381,9 +2381,6 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
             shutil.rmtree(work_dir, ignore_errors=True)
         return
     elif '/index' in caption:
-        if file_format not in ['zip', 'bpc']:
-            await message.answer("❔ Загрузите .zip или .bpc архив.")
-            return
         y = await message.answer("⏳<b>Индексирую...</b>", parse_mode="HTML")
         work_dir = Path(f'work/work_BPC/{r}')
         work_dir.mkdir(parents=True, exist_ok=True)
