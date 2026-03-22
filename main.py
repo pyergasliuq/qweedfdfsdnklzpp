@@ -53,13 +53,24 @@ loging_id = [2080411409]
 boti = Bot(token=os.getenv("token2"))
 length = 4
 DB_PATH = 'users.db'
+BOT_NAME = "Pweper Bot"
+BOT_USERNAME = "pweper_bot"
+SUPPORT_USERNAME = "keedboy016"
+GROQ_RATE_LIMIT_PER_MIN = 10
+FREE_TRIAL_STARS = 1
+FREE_TRIAL_DAYS = 3
+FREE_TRIAL_FREE_REFS = 25
 
 FREE_MAX_FILE_MB = 20
 FREE_DELAY_SEC = 2
 MAX_WORK_SIZE_GB = 1.5
+FREE_TIMEOUT_SEC = 60  # seconds before warning free users
 ANTISPAM_WINDOW = 10
 ANTISPAM_LIMIT = 6
 ANTISPAM_BLOCK_SEC = 45
+FILE_ANTISPAM_WINDOW = 10
+FILE_ANTISPAM_LIMIT = 4
+FILE_ANTISPAM_BLOCK_SEC = 30
 DEFAULT_CHANNELS = ['@pweper', '@nonerai', '@noberai_team']
 
 SUBSCRIPTION_PLANS = [
@@ -155,6 +166,15 @@ class AdminFSM(StatesGroup):
     unban_id = State()
     promo_create = State()
     promo_code_input = State()
+    ticket_reply = State()
+    ticket_close = State()
+
+class SupportFSM(StatesGroup):
+    subject = State()
+    message = State()
+
+class BatchFSM(StatesGroup):
+    collecting = State()
 
 class BuyFSM(StatesGroup):
     waiting_promo = State()
@@ -194,6 +214,25 @@ async def queue_release(is_paid: bool):
     else:
         _free_semaphore.release()
 
+async def run_with_timeout(coro, timeout_sec: float, user_id: int,
+                           is_paid: bool, is_large_file: bool = False):
+    """Run coroutine with timeout; warns free user if too slow."""
+    if is_paid or is_large_file:
+        return await coro
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        try:
+            await bot.send_message(
+                user_id,
+                "⏱ <b>Превышено время обработки!</b>\n\n"
+                "Запрос занял слишком много времени.\n"
+                "💎 Для снятия ограничений купите <b>Premium</b>.",
+                parse_mode="HTML")
+        except Exception:
+            pass
+        raise
+
 def check_antispam(user_id: int, is_paid: bool = False):
     if is_paid:
         return True, 0.0
@@ -219,6 +258,35 @@ def check_antispam(user_id: int, is_paid: bool = False):
             c.execute("UPDATE antispam SET window_start=?, msg_count=1, blocked_until=0 WHERE user_id=?", (now, user_id))
     else:
         c.execute("INSERT INTO antispam (user_id, window_start, msg_count) VALUES (?,?,1)", (user_id, now))
+    conn.commit(); conn.close()
+    return True, 0.0
+
+def check_file_antispam(user_id: int, is_paid: bool = False):
+    if is_paid:
+        return True, 0.0
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = time.time()
+    c.execute("SELECT file_window_start, file_count, file_blocked_until FROM antispam WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if row:
+        ws, fc, bu = row
+        if bu and now < bu:
+            conn.close()
+            return False, bu
+        if now - ws < FILE_ANTISPAM_WINDOW:
+            fc += 1
+            if fc > FILE_ANTISPAM_LIMIT:
+                new_bu = now + FILE_ANTISPAM_BLOCK_SEC
+                c.execute("UPDATE antispam SET file_count=?, file_blocked_until=? WHERE user_id=?", (fc, new_bu, user_id))
+                conn.commit(); conn.close()
+                return False, new_bu
+            c.execute("UPDATE antispam SET file_count=? WHERE user_id=?", (fc, user_id))
+        else:
+            c.execute("UPDATE antispam SET file_window_start=?, file_count=1, file_blocked_until=0 WHERE user_id=?", (now, user_id))
+    else:
+        c.execute("INSERT OR IGNORE INTO antispam (user_id, file_window_start, file_count) VALUES (?,?,1)", (user_id, now))
+        c.execute("UPDATE antispam SET file_window_start=?, file_count=1, file_blocked_until=0 WHERE user_id=?", (now, user_id))
     conn.commit(); conn.close()
     return True, 0.0
 
@@ -416,10 +484,19 @@ def use_promo(code, user_id):
         return False, None, "❌ Лимит использований исчерпан"
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    c.execute("SELECT active_promo FROM users WHERE chat_id=?", (user_id,))
+    existing = c.fetchone()
+    if existing and existing[0] and existing[0].upper() != code.upper():
+        old_promo = get_promo(existing[0])
+        if old_promo:
+            c.execute("UPDATE users SET active_promo=NULL, promo_expires=NULL WHERE chat_id=?", (user_id,))
+            conn.commit()
     try:
         c.execute("INSERT INTO promo_uses (code,user_id,used_at) VALUES (?,?,?)",
                   (code.upper(), user_id, datetime.datetime.now().isoformat()))
         c.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=?", (code.upper(),))
+        c.execute("UPDATE users SET active_promo=?, promo_expires=? WHERE chat_id=?",
+                  (code.upper(), p["expires_at"], user_id))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
@@ -446,6 +523,155 @@ REFERRAL_BONUS_TIERS = [(50, 25), (20, 20), (10, 15), (1, 10)]
 REFERRAL_REWARD_PCT = 15
 L2_REWARD_TIERS = [(50, 4), (20, 3), (10, 2), (0, 1)]
 
+
+ROLES = {
+    "developer": {"level": 3, "label": "👨‍💻 Разработчик"},
+    "admin":     {"level": 2, "label": "🛡 Администратор"},
+    "moderator": {"level": 1, "label": "🔧 Модератор"},
+}
+
+def get_role(user_id: int) -> str:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT role FROM users WHERE chat_id=?", (user_id,))
+    row = c.fetchone(); conn.close()
+    if row and row[0] in ROLES:
+        return row[0]
+    c2 = sqlite3.connect(DB_PATH)
+    cur = c2.cursor()
+    cur.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
+    r2 = cur.fetchone(); c2.close()
+    if r2 and r2[0] == "True":
+        return "admin"
+    return None
+
+def get_role_level(user_id: int) -> int:
+    role = get_role(user_id)
+    return ROLES.get(role, {}).get("level", 0)
+
+def has_perm(user_id: int, min_role: str) -> bool:
+    return get_role_level(user_id) >= ROLES.get(min_role, {}).get("level", 999)
+
+def set_role(user_id: int, role: str, by_id: int):
+    if role not in ROLES and role != "none":
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    new_role = role if role != "none" else None
+    new_admin = "True" if role in ("admin", "developer") else "False"
+    c.execute("UPDATE users SET role=?, admin=? WHERE chat_id=?", (new_role, new_admin, user_id))
+    ok = c.rowcount > 0
+    conn.commit()
+    if ok:
+        c.execute("INSERT INTO role_log (user_id, role, assigned_by, assigned_at) VALUES (?,?,?,?)",
+                  (user_id, role, by_id, datetime.datetime.now().isoformat()))
+        conn.commit()
+    conn.close()
+    return ok
+
+def get_all_staff():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT chat_id, username, role FROM users WHERE role IS NOT NULL ORDER BY role")
+    rows = c.fetchall(); conn.close()
+    return rows
+
+
+
+def create_prank_poll(question: str, real_opts: list, mapped_opts: list,
+                      mode: str, created_by: int) -> int:
+    import json as _j
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""INSERT INTO prank_polls
+        (question, real_options, mapped_options, mode, created_by, created_at, votes_json)
+        VALUES (?,?,?,?,?,?,?)""",
+        (question, _j.dumps(real_opts, ensure_ascii=False),
+         _j.dumps(mapped_opts, ensure_ascii=False),
+         mode, created_by, datetime.datetime.now().isoformat(), "{}"))
+    pid = c.lastrowid
+    conn.commit(); conn.close()
+    return pid
+
+def get_prank_poll(poll_id: int):
+    import json as _j
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM prank_polls WHERE id=?", (poll_id,))
+    row = c.fetchone(); conn.close()
+    if not row:
+        return None
+    keys = ["id","question","real_options","mapped_options","mode",
+            "created_by","created_at","votes_json","is_active","tg_poll_id"]
+    d = dict(zip(keys, row))
+    d["real_options"] = _j.loads(d["real_options"])
+    d["mapped_options"] = _j.loads(d["mapped_options"])
+    try:
+        d["votes_json"] = _j.loads(d["votes_json"] or "{}")
+    except:
+        d["votes_json"] = {}
+    return d
+
+def record_prank_vote(poll_id: int, user_id: int, chosen_idx: int):
+    import json as _j
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT votes_json, mapped_options FROM prank_polls WHERE id=?", (poll_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close(); return None
+    votes = _j.loads(row[0] or "{}")
+    mapped = _j.loads(row[1])
+    str_uid = str(user_id)
+    if str_uid in votes:
+        conn.close(); return votes[str_uid]["real"]
+    real_idx = chosen_idx
+    votes[str_uid] = {"chosen": chosen_idx, "real": real_idx}
+    c.execute("UPDATE prank_polls SET votes_json=? WHERE id=?", (_j.dumps(votes), poll_id))
+    conn.commit(); conn.close()
+    return real_idx
+
+def get_prank_poll_stats(poll_id: int):
+    import json as _j
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT votes_json, real_options FROM prank_polls WHERE id=?", (poll_id,))
+    row = c.fetchone(); conn.close()
+    if not row:
+        return {}
+    votes = _j.loads(row[0] or "{}")
+    opts = _j.loads(row[1])
+    counts = {i: 0 for i in range(len(opts))}
+    for v in votes.values():
+        idx = v.get("real", v.get("chosen", 0))
+        counts[idx] = counts.get(idx, 0) + 1
+    return {opts[i]: counts.get(i, 0) for i in range(len(opts))}
+
+def get_review_stats():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*), AVG(rating) FROM reviews")
+    row = c.fetchone()
+    conn.close()
+    total = row[0] or 0
+    avg = round(row[1], 2) if row[1] else 0.0
+    return total, avg
+
+def add_review(user_id: int, rating: int, text: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO reviews (user_id, rating, text, created_at) VALUES (?,?,?,?)",
+              (user_id, rating, text, datetime.datetime.now().isoformat()))
+    conn.commit(); conn.close()
+
+def get_reviews(limit: int = 20):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT r.user_id, u.username, r.rating, r.text, r.created_at FROM reviews r LEFT JOIN users u ON r.user_id=u.chat_id ORDER BY r.created_at DESC LIMIT ?", (limit,))
+    rows = c.fetchall(); conn.close()
+    return rows
+
+
 def get_ref_link(user_id):
     import base64
     token = base64.urlsafe_b64encode(str(user_id).encode()).decode().rstrip("=")
@@ -461,6 +687,9 @@ def decode_ref_token(token):
 
 def register_referral(referrer_id, referred_id):
     if referrer_id == referred_id:
+        return
+    suspicious, reason = is_referral_suspicious(referrer_id, referred_id)
+    if suspicious:
         return
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -553,6 +782,275 @@ def get_ref_stats(user_id):
     conn.close()
     return total, paid, balance
 
+
+# ── Groq rate limit ────────────────────────────────────────────────────
+def check_groq_rate(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = __import__('time').time()
+    c.execute("SELECT window_start, count FROM groq_rate WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if row:
+        ws, cnt = row
+        if now - ws < 60:
+            if cnt >= GROQ_RATE_LIMIT_PER_MIN:
+                conn.close()
+                return False
+            c.execute("UPDATE groq_rate SET count=count+1 WHERE user_id=?", (user_id,))
+        else:
+            c.execute("UPDATE groq_rate SET window_start=?, count=1 WHERE user_id=?", (now, user_id))
+    else:
+        c.execute("INSERT INTO groq_rate (user_id, window_start, count) VALUES (?,?,1)", (user_id, now))
+    conn.commit(); conn.close()
+    return True
+
+# ── Command stats ──────────────────────────────────────────────────────
+def log_command(user_id: int, command: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO command_stats (user_id, command, used_at) VALUES (?,?,?)",
+              (user_id, command, datetime.datetime.now().isoformat()))
+    conn.commit(); conn.close()
+
+def get_command_stats(limit=15):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT command, COUNT(*) as cnt FROM command_stats GROUP BY command ORDER BY cnt DESC LIMIT ?", (limit,))
+    rows = c.fetchall(); conn.close()
+    return rows
+
+# ── Registration tracking ──────────────────────────────────────────────
+def register_user_date(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO registrations (user_id, registered_at) VALUES (?,?)",
+              (user_id, datetime.datetime.now().isoformat()))
+    conn.commit(); conn.close()
+
+def get_reg_stats(period_hours: int = 24):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    since = (datetime.datetime.now() - datetime.timedelta(hours=period_hours)).isoformat()
+    c.execute("SELECT COUNT(*) FROM registrations WHERE registered_at >= ?", (since,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def get_reg_chart(period: str = "week"):
+    periods = {"hour": (1, "%H:%M", 1), "day": (24, "%H:00", 1),
+               "week": (168, "%d.%m", 24), "month": (720, "%d.%m", 24*7), "year": (8760, "%m.%Y", 24*30)}
+    hours, fmt, bucket_h = periods.get(period, periods["week"])
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    since = (datetime.datetime.now() - datetime.timedelta(hours=hours)).isoformat()
+    c.execute("SELECT registered_at FROM registrations WHERE registered_at >= ? ORDER BY registered_at", (since,))
+    rows = c.fetchall(); conn.close()
+    buckets = {}
+    for (ts,) in rows:
+        try:
+            dt = datetime.datetime.fromisoformat(ts)
+            bucket = dt.strftime(fmt)
+            buckets[bucket] = buckets.get(bucket, 0) + 1
+        except: pass
+    return buckets
+
+# ── Purchase history ───────────────────────────────────────────────────
+def log_purchase(user_id: int, stars: int, days: int, plan_label: str,
+                 promo_code: str = None, discount_pct: int = 0):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO purchases (user_id,stars,days,plan_label,promo_code,discount_pct,created_at) VALUES (?,?,?,?,?,?,?)",
+              (user_id, stars, days, plan_label, promo_code, discount_pct, datetime.datetime.now().isoformat()))
+    conn.commit(); conn.close()
+
+def get_purchase_history(user_id: int = None, limit: int = 20):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if user_id:
+        c.execute("SELECT p.*, u.username FROM purchases p LEFT JOIN users u ON p.user_id=u.chat_id WHERE p.user_id=? ORDER BY p.created_at DESC LIMIT ?", (user_id, limit))
+    else:
+        c.execute("SELECT p.*, u.username FROM purchases p LEFT JOIN users u ON p.user_id=u.chat_id ORDER BY p.created_at DESC LIMIT ?", (limit,))
+    rows = c.fetchall(); conn.close()
+    return rows
+
+def get_purchase_stats(period_hours: int = 24):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    since = (datetime.datetime.now() - datetime.timedelta(hours=period_hours)).isoformat()
+    c.execute("SELECT COUNT(*), COALESCE(SUM(stars),0) FROM purchases WHERE created_at >= ?", (since,))
+    count, total = c.fetchone()
+    conn.close()
+    return count, total
+
+# ── Support tickets ────────────────────────────────────────────────────
+def create_ticket(user_id: int, username: str, is_premium: bool, subject: str, message: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO support_tickets (user_id,username,is_premium,subject,message,created_at) VALUES (?,?,?,?,?,?)",
+              (user_id, username, 1 if is_premium else 0, subject, message, datetime.datetime.now().isoformat()))
+    ticket_id = c.lastrowid
+    conn.commit(); conn.close()
+    return ticket_id
+
+def get_open_tickets(premium_first: bool = True):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    order = "is_premium DESC, created_at ASC" if premium_first else "created_at ASC"
+    c.execute(f"SELECT id,user_id,username,is_premium,subject,status,created_at FROM support_tickets WHERE status='open' ORDER BY {order}")
+    rows = c.fetchall(); conn.close()
+    return rows
+
+def get_ticket(ticket_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM support_tickets WHERE id=?", (ticket_id,))
+    row = c.fetchone(); conn.close()
+    return row
+
+def close_ticket(ticket_id: int, admin_id: int, reply: str = None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE support_tickets SET status='closed',closed_at=?,closed_by=?,reply=? WHERE id=?",
+              (datetime.datetime.now().isoformat(), admin_id, reply, ticket_id))
+    conn.commit(); conn.close()
+
+def get_ticket_stats():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM support_tickets"); total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM support_tickets WHERE status='open'"); open_t = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM support_tickets WHERE is_premium=1 AND status='open'"); prem_open = c.fetchone()[0]
+    conn.close()
+    return total, open_t, prem_open
+
+# ── Promo: single active per user, auto-expire check ──────────────────
+def set_user_active_promo(user_id: int, code: str, expires_at: str = None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET active_promo=?, promo_expires=? WHERE chat_id=?",
+              (code.upper() if code else None, expires_at, user_id))
+    conn.commit(); conn.close()
+
+def get_user_active_promo(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT active_promo, promo_expires FROM users WHERE chat_id=?", (user_id,))
+    row = c.fetchone(); conn.close()
+    if not row or not row[0]:
+        return None
+    code, exp = row
+    if exp:
+        try:
+            if datetime.datetime.now() > datetime.datetime.fromisoformat(exp):
+                conn2 = sqlite3.connect(DB_PATH)
+                c2 = conn2.cursor()
+                c2.execute("UPDATE users SET active_promo=NULL, promo_expires=NULL WHERE chat_id=?", (user_id,))
+                conn2.commit(); conn2.close()
+                return None
+        except: pass
+    p = get_promo(code)
+    if not p:
+        conn3 = sqlite3.connect(DB_PATH)
+        c3 = conn3.cursor()
+        c3.execute("UPDATE users SET active_promo=NULL, promo_expires=NULL WHERE chat_id=?", (user_id,))
+        conn3.commit(); conn3.close()
+        return None
+    return p
+
+# ── Trial subscription ─────────────────────────────────────────────────
+def can_use_trial(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT trial_used FROM users WHERE chat_id=?", (user_id,))
+    row = c.fetchone(); conn.close()
+    return row and row[0] != 'True'
+
+def mark_trial_used(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET trial_used='True' WHERE chat_id=?", (user_id,))
+    conn.commit(); conn.close()
+
+# ── Free ref milestone ─────────────────────────────────────────────────
+def check_free_ref_milestone(referrer_id: int):
+    """Award 1 month Pro when referrer has brought 25 total referrals.
+    Stars-based referrals don't count here; milestone fires only once."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (referrer_id,))
+    total_count = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND reward_given=1", (referrer_id,))
+    already = c.fetchone()[0]
+    awarded = False
+    if total_count >= FREE_TRIAL_FREE_REFS and already == 0:
+        expiry = (datetime.datetime.now() + datetime.timedelta(days=30)).strftime("%d.%m.%Y")
+        c.execute("UPDATE users SET sub='True', time=? WHERE chat_id=?", (expiry, referrer_id))
+        c.execute("UPDATE referrals SET reward_given=1 WHERE referrer_id=?", (referrer_id,))
+        awarded = True
+    conn.commit(); conn.close()
+    return awarded, total_count
+
+# ── Anti-cheat referral ────────────────────────────────────────────────
+def is_referral_suspicious(referrer_id: int, referred_id: int) -> tuple:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT registered_at FROM registrations WHERE user_id=?", (referred_id,))
+    row = c.fetchone()
+    if row:
+        try:
+            reg = datetime.datetime.fromisoformat(row[0])
+            if (datetime.datetime.now() - reg).total_seconds() < 300:
+                conn.close()
+                return True, "Аккаунт зарегистрирован < 5 минут назад"
+        except: pass
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND created_at >= ?",
+              (referrer_id, (datetime.datetime.now() - datetime.timedelta(hours=1)).isoformat()))
+    hourly = c.fetchone()[0]
+    conn.close()
+    if hourly >= 10:
+        return True, "Слишком много рефералов за 1 час"
+    return False, None
+
+# ── Batch session ──────────────────────────────────────────────────────
+def start_batch(user_id: int, command: str, caption: str = ""):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO batch_sessions (user_id,command,caption,files,started_at) VALUES (?,?,?,'[]',?)",
+              (user_id, command, caption, datetime.datetime.now().isoformat()))
+    conn.commit(); conn.close()
+
+def add_batch_file(user_id: int, file_id: str, file_name: str):
+    import json as _json
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT files FROM batch_sessions WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return False
+    files = _json.loads(row[0])
+    files.append({"file_id": file_id, "file_name": file_name})
+    c.execute("UPDATE batch_sessions SET files=? WHERE user_id=?", (_json.dumps(files), user_id))
+    conn.commit(); conn.close()
+    return True
+
+def get_batch(user_id: int):
+    import json as _json
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT command, caption, files FROM batch_sessions WHERE user_id=?", (user_id,))
+    row = c.fetchone(); conn.close()
+    if not row:
+        return None
+    return {"command": row[0], "caption": row[1], "files": _json.loads(row[2])}
+
+def clear_batch(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM batch_sessions WHERE user_id=?", (user_id,))
+    conn.commit(); conn.close()
+
+
 async def send_invoice_for_plan(chat_id: int, user_id: int, plan: dict):
     payload = f"sub_{plan['stars']}_{plan['days']}_{user_id}_{int(time.time())}"
     save_invoice(payload, user_id, plan['stars'], plan['days'])
@@ -586,15 +1084,30 @@ def kb_check_channels(channels: list):
     b.adjust(1)
     return b.as_markup()
 
-def kb_admin_main():
+def kb_admin_main(user_id: int = 0):
+    role = get_role(user_id) or "admin"
+    lvl = get_role_level(user_id) if user_id else 2
     b = InlineKeyboardBuilder()
     b.button(text="📊 Статистика", callback_data="adm_stats")
     b.button(text="🏆 Топ активности", callback_data="adm_top")
-    b.button(text="🚫 Баны", callback_data="adm_bans_list")
-    b.button(text="📢 Рассылка", callback_data="adm_broadcast")
-    b.button(text="📋 Создать опрос", callback_data="adm_poll_create")
-    b.button(text="📣 Каналы подписки", callback_data="adm_channels")
+    b.button(text="📈 Графики", callback_data="adm_charts")
+    b.button(text="🎫 Тех. поддержка", callback_data="adm_tickets")
     b.button(text="🗑 Очистить work/", callback_data="adm_cleanup")
+    if lvl >= 2:
+        b.button(text="🚫 Баны", callback_data="adm_bans_list")
+        b.button(text="🎁 Выдать подписку", callback_data="adm_givesub_panel")
+        b.button(text="📢 Рассылка", callback_data="adm_broadcast")
+        b.button(text="📋 Опросы", callback_data="adm_polls_menu")
+        b.button(text="🃏 Пранк-опросы", callback_data="adm_prank_menu")
+        b.button(text="🎟 Промокоды", callback_data="adm_promos")
+        b.button(text="👥 Рефералы", callback_data="adm_ref_stats")
+        b.button(text="🛒 История покупок", callback_data="adm_purchases")
+        b.button(text="⭐ Отзывы", callback_data="adm_reviews")
+    if lvl >= 3:
+        b.button(text="📣 Каналы подписки", callback_data="adm_channels")
+        b.button(text="👑 Управление ролями", callback_data="adm_roles")
+        b.button(text="📋 Лог ролей", callback_data="adm_role_log")
+        b.button(text="👮 Активность стаффа", callback_data="adm_staff_stats")
     b.adjust(2)
     return b.as_markup()
 
@@ -605,12 +1118,12 @@ def kb_back_admin():
 
 def start_free_text():
     return (
-        "👋 <b>Добро пожаловать в BR Assembly Bot!</b>\n\n"
+        "👋 <b>Добро пожаловать в " + BOT_NAME + "!</b>\n\n"
         "⚠️ <b>Вы используете бесплатную версию</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "❌ <b>Ограничения без подписки:</b>\n"
         "  • Файлы не более <b>20 МБ</b>\n"
-        "  • Задержка <b>8–15 сек</b> перед обработкой\n"
+        "  • Задержка <b>2–3 сек</b> перед обработкой\n"
         "  • Ставитесь в очередь <b>за платными</b>\n"
         "  • Обязательна подписка на 3 канала\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -642,7 +1155,7 @@ def initialize_database():
         admin TEXT DEFAULT 'False',
         time TEXT
     )''')
-    for col, defval in [("banned","'False'"),("ban_reason","NULL"),("msg_count","0"),("last_active","NULL")]:
+    for col, defval in [("banned","'False'"),("ban_reason","NULL"),("msg_count","0"),("last_active","NULL"),("role","NULL")]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT {defval}")
         except sqlite3.OperationalError:
@@ -663,16 +1176,99 @@ def initialize_database():
         question TEXT NOT NULL, options TEXT NOT NULL,
         created_at TEXT, created_by INTEGER, is_active INTEGER DEFAULT 1
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS prank_polls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        question TEXT NOT NULL,
+        real_options TEXT NOT NULL,
+        mapped_options TEXT NOT NULL,
+        mode TEXT DEFAULT 'remap',
+        created_by INTEGER,
+        created_at TEXT,
+        votes_json TEXT DEFAULT '{}',
+        is_active INTEGER DEFAULT 1,
+        tg_poll_id TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS reviews (
+        user_id INTEGER PRIMARY KEY,
+        rating INTEGER NOT NULL,
+        text TEXT,
+        created_at TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS role_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        role TEXT,
+        assigned_by INTEGER,
+        assigned_at TEXT
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS antispam (
         user_id INTEGER PRIMARY KEY,
         window_start REAL DEFAULT 0,
         msg_count INTEGER DEFAULT 0,
-        blocked_until REAL DEFAULT 0
+        blocked_until REAL DEFAULT 0,
+        file_window_start REAL DEFAULT 0,
+        file_count INTEGER DEFAULT 0,
+        file_blocked_until REAL DEFAULT 0
     )''')
+    for col3 in ["file_window_start","file_count","file_blocked_until"]:
+        try:
+            c.execute(f"ALTER TABLE antispam ADD COLUMN {col3} REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
     c.execute('''CREATE TABLE IF NOT EXISTS pending_invoices (
         payload TEXT PRIMARY KEY,
         user_id INTEGER, stars INTEGER, days INTEGER, created_at TEXT
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS support_tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        is_premium INTEGER DEFAULT 0,
+        subject TEXT NOT NULL,
+        message TEXT NOT NULL,
+        status TEXT DEFAULT 'open',
+        created_at TEXT,
+        closed_at TEXT,
+        closed_by INTEGER,
+        reply TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS purchases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        stars INTEGER NOT NULL,
+        days INTEGER NOT NULL,
+        plan_label TEXT,
+        promo_code TEXT,
+        discount_pct INTEGER DEFAULT 0,
+        created_at TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS command_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        command TEXT NOT NULL,
+        used_at TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS registrations (
+        user_id INTEGER PRIMARY KEY,
+        registered_at TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS batch_sessions (
+        user_id INTEGER PRIMARY KEY,
+        command TEXT NOT NULL,
+        caption TEXT,
+        files TEXT DEFAULT '[]',
+        started_at TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS groq_rate (
+        user_id INTEGER PRIMARY KEY,
+        window_start REAL DEFAULT 0,
+        count INTEGER DEFAULT 0
+    )''')
+    for col4, def4 in [("trial_used","'False'"),("active_promo","NULL"),("promo_expires","NULL")]:
+        try:
+            c.execute(f"ALTER TABLE users ADD COLUMN {col4} TEXT DEFAULT {def4}")
+        except:
+            pass
     conn.commit()
     conn.close()
 
@@ -702,6 +1298,11 @@ async def update(chat_id, username):
     else:
         cursor.execute("INSERT INTO users (chat_id, username, sub, admin, time) VALUES (?, ?, 'False', 'False', NULL)",
                        (chat_id, username))
+        conn2_reg = sqlite3.connect(DB_PATH)
+        c2_reg = conn2_reg.cursor()
+        c2_reg.execute("INSERT OR IGNORE INTO registrations (user_id, registered_at) VALUES (?,?)",
+                       (chat_id, datetime.datetime.now().isoformat()))
+        conn2_reg.commit(); conn2_reg.close()
     conn.commit()
     conn.close()
     return sub, message_to_send
@@ -1802,17 +2403,91 @@ async def on_payment(message: types.Message):
     payload = message.successful_payment.invoice_payload
     row = pop_invoice(payload)
     if not row:
-        await message.answer("✅ Оплата получена, но возникла ошибка выдачи. Напишите @keedboy016")
+        await message.answer(
+            "✅ Оплата получена, но возникла ошибка выдачи. Напишите @" + SUPPORT_USERNAME)
         return
     user_id, stars, days = row
     expiry = grant_subscription(user_id, days)
-    plan_label = next((p["label"] for p in SUBSCRIPTION_PLANS if p["stars"] == stars), f"{days} дн.")
+
+    is_trial = (stars == FREE_TRIAL_STARS and days == FREE_TRIAL_DAYS)
+    if is_trial:
+        mark_trial_used(user_id)
+        plan_label = "3 дня (пробный период)"
+    else:
+        plan_label = next((p["label"] for p in SUBSCRIPTION_PLANS if p["stars"] == stars), f"{days} дн.")
+
+    # Always log
+    log_purchase(user_id, stars, days, plan_label)
+
+    # Referral bonus — only for real paid subs, not trial
+    if not is_trial and stars > FREE_TRIAL_STARS:
+        ref_result = mark_referral_paid(user_id, stars)
+        if ref_result and ref_result[0]:
+            referrer_id, reward = ref_result[0], ref_result[1]
+            l2_id, l2_reward = ref_result[2], ref_result[3]
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    f"🌟 <b>Реферальный бонус!</b>\n"
+                    f"Ваш реферал купил Premium — вам начислено <b>{reward}⭐</b>",
+                    parse_mode="HTML")
+            except Exception:
+                pass
+            if l2_id and l2_reward:
+                try:
+                    await bot.send_message(
+                        l2_id,
+                        f"🌟 <b>Бонус 2-го уровня!</b>\nНачислено <b>{l2_reward}⭐</b>",
+                        parse_mode="HTML")
+                except Exception:
+                    pass
+        # Free milestone: 25 total refs → 1 month Pro (for the referrer of this buyer)
+        conn_m = sqlite3.connect(DB_PATH)
+        cm = conn_m.cursor()
+        cm.execute("SELECT referrer_id FROM referrals WHERE referred_id=?", (user_id,))
+        ref_row = cm.fetchone(); conn_m.close()
+        if ref_row:
+            awarded_m, cnt_m = check_free_ref_milestone(ref_row[0])
+            if awarded_m:
+                try:
+                    await bot.send_message(
+                        ref_row[0],
+                        f"🎁 <b>Поздравляем!</b>\n"
+                        f"Вы привели <b>{cnt_m}</b> пользователей — вам выдана Pro-подписка на <b>1 месяц</b>!",
+                        parse_mode="HTML")
+                except Exception:
+                    pass
+
     until_text = "♾️ бессрочно" if days == -1 else f"до <b>{expiry}</b>"
     await message.answer(
-        f"🎉 <b>Premium активирован!</b>\n\n"
+        f"🎉 <b>{'Пробный период' if is_trial else 'Premium'} активирован!</b>\n\n"
         f"💎 Тариф: <b>{plan_label}</b>\n"
         f"📅 Действует: {until_text}\n\n"
         "Все ограничения сняты. Приятного использования!", parse_mode="HTML")
+
+    # Notify all admins
+    try:
+        conn_adm = sqlite3.connect(DB_PATH)
+        cadm = conn_adm.cursor()
+        cadm.execute("SELECT chat_id FROM users WHERE admin='True'")
+        adm_ids = [r[0] for r in cadm.fetchall()]; conn_adm.close()
+        uname_str = message.from_user.username or ""
+        name_str = f"@{uname_str}" if uname_str else f"ID:{user_id}"
+        trial_tag = " [ПРОБНЫЙ]" if is_trial else ""
+        notif = (
+            f"💰 <b>Новая покупка!</b>{trial_tag}\n"
+            f"👤 {name_str} (<code>{user_id}</code>)\n"
+            f"📦 Тариф: <b>{plan_label}</b>\n"
+            f"⭐ Звёзд: <b>{stars}</b> | До: <b>{expiry}</b>"
+        )
+        for adm_id in adm_ids:
+            if adm_id != user_id:
+                try:
+                    await bot.send_message(adm_id, notif, parse_mode="HTML")
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 @dp.callback_query(F.data.startswith("buy_"))
 async def cb_buy(callback: types.CallbackQuery, state: FSMContext):
@@ -1837,6 +2512,22 @@ async def cb_buy(callback: types.CallbackQuery, state: FSMContext):
         "🎟 Есть промокод? Введи его или нажми пропустить.\n\n"
         "Цена: <b>" + str(plan["stars"]) + "⭐ — " + plan["label"] + "</b>",
         reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "buy_trial")
+async def cb_buy_trial(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    if not can_use_trial(uid):
+        await callback.answer("❌ Вы уже использовали пробный период", show_alert=True)
+        return
+    trial_plan = {"stars": FREE_TRIAL_STARS, "days": FREE_TRIAL_DAYS,
+                  "label": "3 дня (пробный)", "emoji": "⚡"}
+    await callback.answer()
+    await send_invoice_for_plan(uid, uid, trial_plan)
+
+@dp.callback_query(F.data == "show_plans")
+async def cb_show_plans(callback: types.CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(start_free_text(), reply_markup=kb_subscription_plans(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "buy_skip_promo")
 async def cb_buy_skip(callback: types.CallbackQuery, state: FSMContext):
@@ -1891,26 +2582,75 @@ async def cb_adm_main(callback: types.CallbackQuery):
     if not (row and row[0] == 'True'):
         await callback.answer("❌", show_alert=True); return
     s = get_bot_stats()
-    text = (f"🛠 <b>Панель администратора</b>\n\n"
+    role_label = ROLES.get(get_role(callback.from_user.id), {}).get("label", "👤 Стафф")
+    text = (f"🛠 <b>Панель {role_label}</b>\n\n"
             f"👥 Всего: <b>{s['total']}</b> | 💎 Premium: <b>{s['paid']}</b>\n"
             f"🆓 Бесплатных: <b>{s['free']}</b> | 🚫 Банов: <b>{s['banned']}</b>\n"
             f"📅 Активно сегодня: <b>{s['today']}</b>\n"
             f"💾 Work: <b>{get_work_size_gb():.2f} ГБ</b>")
-    await callback.message.edit_text(text, reply_markup=kb_admin_main(), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=kb_admin_main(callback.from_user.id), parse_mode="HTML")
 
 @dp.callback_query(F.data == "adm_stats")
 async def cb_adm_stats(callback: types.CallbackQuery):
     s = get_bot_stats()
     top = get_top_users(5)
-    text = (f"📊 <b>Статистика бота</b>\n\n"
-            f"👥 Всего: <b>{s['total']}</b>\n💎 Premium: <b>{s['paid']}</b>\n"
-            f"🆓 Free: <b>{s['free']}</b>\n🚫 Banned: <b>{s['banned']}</b>\n"
-            f"📅 Сегодня активны: <b>{s['today']}</b>\n"
-            f"💾 Work-папка: <b>{get_work_size_gb():.2f} ГБ</b>\n\n🏆 <b>Топ-5:</b>\n")
+    c24, s24 = get_purchase_stats(24)
+    c7d, s7d = get_purchase_stats(24 * 7)
+    c30d, s30d = get_purchase_stats(24 * 30)
+    reg24 = get_reg_stats(24)
+    reg7d = get_reg_stats(24 * 7)
+    t_total, t_open, t_prem_open = get_ticket_stats()
+    conn_r = sqlite3.connect(DB_PATH)
+    cr = conn_r.cursor()
+    cr.execute("SELECT COUNT(*) FROM referrals"); tot_refs = cr.fetchone()[0]
+    cr.execute("SELECT COUNT(*) FROM referrals WHERE paid=1"); paid_refs = cr.fetchone()[0]
+    cr.execute("SELECT COALESCE(SUM(CAST(ref_balance AS INTEGER)),0) FROM users"); total_bal = cr.fetchone()[0]
+    conn_r.close()
+    conn_p = sqlite3.connect(DB_PATH)
+    cp_cur = conn_p.cursor()
+    cp_cur.execute("SELECT COUNT(*) FROM promo_codes WHERE is_active=1"); active_promos = cp_cur.fetchone()[0]
+    cp_cur.execute("SELECT COALESCE(SUM(uses),0) FROM promo_codes"); promo_uses = cp_cur.fetchone()[0]
+    conn_p.close()
+    rev_total, rev_avg = get_review_stats()
+    conn_cmd = sqlite3.connect(DB_PATH)
+    cc = conn_cmd.cursor()
+    today_iso = datetime.datetime.now().strftime("%Y-%m-%d")
+    cc.execute("SELECT COUNT(*) FROM command_stats WHERE used_at LIKE ?", (f"{today_iso}%",))
+    cmds_today = cc.fetchone()[0]
+    cc.execute("SELECT COUNT(*) FROM command_stats"); cmds_total = cc.fetchone()[0]
+    conn_cmd.close()
+    lines = [
+        f"📊 <b>Статистика {BOT_NAME}</b>\n",
+        "━━━━ 👥 Пользователи ━━━━",
+        f"Всего: <b>{s['total']}</b>  |  Premium: <b>{s['paid']}</b>  |  Free: <b>{s['free']}</b>",
+        f"Забанено: <b>{s['banned']}</b>  |  Активны сегодня: <b>{s['today']}</b>",
+        f"Новых за 24ч: <b>{reg24}</b>  |  За 7д: <b>{reg7d}</b>",
+        "\n━━━━ 💰 Покупки ━━━━",
+        f"24ч: <b>{c24}</b> шт / <b>{s24}⭐</b>",
+        f"7д: <b>{c7d}</b> / <b>{s7d}⭐</b>  |  30д: <b>{c30d}</b> / <b>{s30d}⭐</b>",
+        "\n━━━━ 👥 Рефералы ━━━━",
+        f"Всего: <b>{tot_refs}</b>  |  Оплатили: <b>{paid_refs}</b>  |  Баланс: <b>{total_bal}⭐</b>",
+        "\n━━━━ 🎟 Промокоды ━━━━",
+        f"Активных: <b>{active_promos}</b>  |  Активаций: <b>{promo_uses}</b>",
+        "\n━━━━ 🎫 Поддержка ━━━━",
+        f"Тикетов: <b>{t_total}</b>  |  Открытых: <b>{t_open}</b>  |  Premium: <b>{t_prem_open}</b>",
+        "\n━━━━ 🔢 Команды ━━━━",
+        f"Сегодня: <b>{cmds_today}</b>  |  Всего: <b>{cmds_total}</b>",
+        "\n━━━━ ⭐ Отзывы ━━━━",
+        f"Отзывов: <b>{rev_total}</b>  |  Средняя: <b>{rev_avg}/5</b>",
+        f"\n💾 Work: <b>{get_work_size_gb():.2f} ГБ</b>",
+        "\n━━━━ 🏆 Топ-5 ━━━━",
+    ]
     for i, (uid, uname, cnt) in enumerate(top, 1):
         name = f"@{uname}" if uname else f"ID:{uid}"
-        text += f"{i}. {name} — {cnt}\n"
-    await callback.message.edit_text(text, reply_markup=kb_back_admin(), parse_mode="HTML")
+        lines.append(f"{i}. {name} — <b>{cnt}</b>")
+    b = InlineKeyboardBuilder()
+    b.button(text="📈 Графики", callback_data="adm_charts")
+    b.button(text="🛒 Покупки", callback_data="adm_purchases")
+    b.button(text="🎫 Тикеты", callback_data="adm_tickets")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(2)
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "adm_top")
 async def cb_adm_top(callback: types.CallbackQuery):
@@ -2004,11 +2744,15 @@ async def fsm_broadcast(message: types.Message, state: FSMContext):
     users = [r[0] for r in c.fetchall()]; conn.close()
     sent = failed = 0
     progress = await message.answer(f"📤 Начинаю рассылку на {len(users)} пользователей...")
+    broadcaster_role = get_role(message.from_user.id) or "admin"
+    is_anon = broadcaster_role == "developer"
+    broadcaster_name = ("@" + message.from_user.username) if message.from_user.username else ("ID:" + str(message.from_user.id))
+    sig = "" if is_anon else ("\n\n<i>— " + broadcaster_name + "</i>")
     for uid in users:
         try:
-            if message.photo: await message.bot.send_photo(uid, message.photo[-1].file_id, caption=message.caption or "")
-            elif message.document: await message.bot.send_document(uid, message.document.file_id, caption=message.caption or "")
-            elif message.text: await message.bot.send_message(uid, message.text, parse_mode="HTML")
+            if message.photo: await message.bot.send_photo(uid, message.photo[-1].file_id, caption=(message.caption or "") + sig)
+            elif message.document: await message.bot.send_document(uid, message.document.file_id, caption=(message.caption or "") + sig)
+            elif message.text: await message.bot.send_message(uid, message.text + sig, parse_mode="HTML")
             sent += 1
         except: failed += 1
         if (sent + failed) % 50 == 0:
@@ -2066,6 +2810,261 @@ async def fsm_poll_opts(message: types.Message, state: FSMContext):
         await asyncio.sleep(0.05)
     await message.answer(f"✅ Опрос отправлен {sent} пользователям.")
 
+
+@dp.callback_query(F.data == "adm_givesub_panel")
+async def cb_adm_givesub_panel(callback: types.CallbackQuery, state: FSMContext):
+    if not has_perm(callback.from_user.id, "admin"):
+        await callback.answer("❌ Нет прав", show_alert=True); return
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="givesub")
+    await callback.message.answer(
+        "🎁 <b>Выдать подписку</b>\n\nФормат: <code>ID дней</code>\nПример: <code>123456789 30</code>\n-1 = навсегда",
+        parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "adm_roles")
+async def cb_adm_roles(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "developer"):
+        await callback.answer("❌ Только разработчик", show_alert=True); return
+    staff = get_all_staff()
+    lines = ["👑 <b>Управление ролями</b>\n"]
+    if staff:
+        for uid, uname, role in staff:
+            name = ("@" + uname) if uname else ("ID:" + str(uid))
+            lines.append(ROLES.get(role, {}).get("label", role) + " " + name)
+    else:
+        lines.append("Стаффа пока нет")
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Назначить роль", callback_data="adm_role_assign")
+    b.button(text="❌ Снять роль", callback_data="adm_role_remove")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(2)
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_role_assign")
+async def cb_adm_role_assign(callback: types.CallbackQuery, state: FSMContext):
+    if not has_perm(callback.from_user.id, "developer"):
+        await callback.answer("❌", show_alert=True); return
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="role_assign")
+    await state.update_data(assigner_id=callback.from_user.id)
+    await callback.message.answer(
+        "Формат: <code>ID роль</code>\nРоли: moderator, admin, developer\nПример: <code>123456 admin</code>",
+        parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "adm_role_remove")
+async def cb_adm_role_remove(callback: types.CallbackQuery, state: FSMContext):
+    if not has_perm(callback.from_user.id, "developer"):
+        await callback.answer("❌", show_alert=True); return
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="role_remove")
+    await state.update_data(assigner_id=callback.from_user.id)
+    await callback.message.answer("Введите ID пользователя для снятия роли:")
+    await callback.answer()
+
+@dp.callback_query(F.data == "adm_role_log")
+async def cb_adm_role_log(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "developer"):
+        await callback.answer("❌", show_alert=True); return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT rl.user_id, u1.username, rl.role, u2.username, rl.assigned_at
+                 FROM role_log rl
+                 LEFT JOIN users u1 ON rl.user_id=u1.chat_id
+                 LEFT JOIN users u2 ON rl.assigned_by=u2.chat_id
+                 ORDER BY rl.assigned_at DESC LIMIT 20""")
+    rows = c.fetchall(); conn.close()
+    lines = ["📋 <b>Лог ролей (последние 20):</b>\n"]
+    for uid, uname, role, by_name, at in rows:
+        name = ("@" + uname) if uname else ("ID:" + str(uid))
+        by = ("@" + by_name) if by_name else "—"
+        lines.append("• " + name + " → " + str(role) + " | " + by + " | " + (at[:10] if at else "—"))
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_roles")
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_staff_stats")
+async def cb_adm_staff_stats(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "developer"):
+        await callback.answer("❌", show_alert=True); return
+    staff = get_all_staff()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    lines = ["👮 <b>Активность стаффа</b>\n"]
+    for uid, uname, role in staff:
+        c.execute("SELECT COUNT(*) FROM support_tickets WHERE closed_by=?", (uid,))
+        closed = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM broadcasts WHERE sent_by=?", (uid,))
+        broadcasts = c.fetchone()[0]
+        name = ("@" + uname) if uname else ("ID:" + str(uid))
+        rl = ROLES.get(role, {}).get("label", role)
+        lines.append(rl + " " + name + "\n  🎫 закрыто тикетов: " + str(closed) + " | 📢 рассылок: " + str(broadcasts))
+    conn.close()
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    await callback.message.edit_text("\n".join(lines) if len(lines) > 1 else "👮 Нет стаффа",
+                                     reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_polls_menu")
+async def cb_adm_polls_menu(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "admin"):
+        await callback.answer("❌ Нет прав", show_alert=True); return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM polls"); total = c.fetchone()[0]
+    conn.close()
+    b = InlineKeyboardBuilder()
+    b.button(text="📋 Создать опрос", callback_data="adm_poll_create")
+    b.button(text="📊 Статистика опросов", callback_data="adm_poll_stats")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(1)
+    await callback.message.edit_text(
+        "📋 <b>Управление опросами</b>\n\nВсего создано: <b>" + str(total) + "</b>",
+        reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_poll_stats")
+async def cb_adm_poll_stats(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "admin"):
+        await callback.answer("❌", show_alert=True); return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, question, created_at FROM polls ORDER BY created_at DESC LIMIT 10")
+    rows = c.fetchall(); conn.close()
+    lines = ["📊 <b>Последние опросы:</b>\n"]
+    for pid, question, created in rows:
+        lines.append("#" + str(pid) + " " + question[:50] + " | " + (created[:10] if created else "—"))
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_polls_menu")
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_prank_menu")
+async def cb_adm_prank_menu(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "admin"):
+        await callback.answer("❌ Нет прав", show_alert=True); return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM prank_polls"); total = c.fetchone()[0]
+    conn.close()
+    b = InlineKeyboardBuilder()
+    b.button(text="🃏 Создать пранк-опрос", callback_data="adm_prank_create")
+    b.button(text="📊 Статистика пранк-опросов", callback_data="adm_prank_stats")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(1)
+    await callback.message.edit_text(
+        "🃏 <b>Пранк-опросы</b>\n\nВсего создано: <b>" + str(total) + "</b>\n\n"
+        "<b>Режимы:</b>\n"
+        "• <code>remap</code> — ответ А засчитывается как Б\n"
+        "• <code>void</code> — кнопка не работает (ничего не происходит)\n"
+        "• <code>reveal</code> — показывает результаты только после ответа",
+        reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_prank_create")
+async def cb_adm_prank_create(callback: types.CallbackQuery, state: FSMContext):
+    if not has_perm(callback.from_user.id, "admin"):
+        await callback.answer("❌", show_alert=True); return
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="prank_create")
+    await callback.message.answer(
+        "🃏 <b>Создание пранк-опроса</b>\n\nФормат (строки):\n"
+        "<code>Вопрос\n"
+        "Режим: remap / void / reveal\n"
+        "Вариант А (что видит),Вариант Б,Вариант В\n"
+        "Реальный А (что засчитается),Реальный Б,Реальный В</code>\n\n"
+        "Для режима <code>void</code> последняя строка = индексы заблокированных кнопок (напр: 0,2)\n\n"
+        "<b>Пример remap:</b>\n"
+        "<code>Согласны с условиями?\nremap\nДа,Нет,Воздержусь\nЯ согласен со ВСЕМ,Нет,Воздержусь</code>",
+        parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "adm_prank_stats")
+async def cb_adm_prank_stats(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "admin"):
+        await callback.answer("❌", show_alert=True); return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, question, mode, votes_json, is_active FROM prank_polls ORDER BY created_at DESC LIMIT 10")
+    rows = c.fetchall(); conn.close()
+    import json as _j
+    lines = ["📊 <b>Пранк-опросы:</b>\n"]
+    for pid, question, mode, votes_json, active in rows:
+        try:
+            votes = _j.loads(votes_json or "{}")
+            vote_count = len(votes)
+        except:
+            vote_count = 0
+        st = "✅" if active else "❌"
+        lines.append(st + " #" + str(pid) + " [" + str(mode) + "] " + question[:40])
+        lines.append("   👥 " + str(vote_count) + " голосов")
+    b = InlineKeyboardBuilder()
+    b.button(text="🔍 Детали опроса", callback_data="adm_prank_detail")
+    b.button(text="⬅️ Назад", callback_data="adm_prank_menu")
+    b.adjust(1)
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_prank_detail")
+async def cb_adm_prank_detail(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="prank_detail")
+    await callback.message.answer("Введите ID пранк-опроса:")
+    await callback.answer()
+
+@dp.callback_query(F.data == "adm_reviews")
+async def cb_adm_reviews(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "admin"):
+        await callback.answer("❌", show_alert=True); return
+    total_r, avg = get_review_stats()
+    reviews = get_reviews(10)
+    stars_map = {5: "⭐⭐⭐⭐⭐", 4: "⭐⭐⭐⭐", 3: "⭐⭐⭐", 2: "⭐⭐", 1: "⭐"}
+    lines = [
+        "⭐ <b>Отзывы</b>\n",
+        "Всего: <b>" + str(total_r) + "</b> | Средняя оценка: <b>" + str(avg) + "</b>\n",
+        "─────────────────"
+    ]
+    for uid, uname, rating, text, created in reviews:
+        name = ("@" + uname) if uname else ("ID:" + str(uid))
+        lines.append(stars_map.get(rating, str(rating) + "⭐") + " " + name)
+        if text:
+            lines.append("  " + text[:100])
+        lines.append("  " + (created[:10] if created else ""))
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("prank_vote_"))
+async def cb_prank_vote(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    poll_id = int(parts[2])
+    chosen_idx = int(parts[3])
+    poll = get_prank_poll(poll_id)
+    if not poll or not poll["is_active"]:
+        await callback.answer("❌ Опрос закрыт", show_alert=True); return
+    mode = poll["mode"]
+    if mode == "void":
+        blocked = poll.get("mapped_options", [])
+        try:
+            void_indices = [int(x) for x in blocked if str(x).isdigit()]
+        except:
+            void_indices = []
+        if chosen_idx in void_indices:
+            await callback.answer("", show_alert=False); return
+        await callback.answer("✅ Голос засчитан!", show_alert=False)
+        return
+    real_idx = record_prank_vote(poll_id, callback.from_user.id, chosen_idx)
+    if mode == "remap":
+        real_opt = poll["mapped_options"][real_idx] if real_idx < len(poll["mapped_options"]) else "?"
+        await callback.answer("✅ Ваш ответ: " + real_opt, show_alert=True)
+    elif mode == "reveal":
+        stats = get_prank_poll_stats(poll_id)
+        lines = ["📊 Результаты:\n"]
+        total_v = sum(stats.values()) or 1
+        for opt, cnt in stats.items():
+            pct = round(cnt / total_v * 100)
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            lines.append(opt[:20] + ": " + bar + " " + str(pct) + "%")
+        await callback.answer("\n".join(lines), show_alert=True)
+
+
 @dp.callback_query(F.data.startswith("promo_apply_"))
 async def cb_promo_apply(callback: types.CallbackQuery):
     parts = callback.data.split("_")
@@ -2084,14 +3083,340 @@ async def cb_promo_apply(callback: types.CallbackQuery):
     await callback.answer()
     await send_invoice_for_plan(uid, uid, new_plan)
 
+
+# ─── Тех. поддержка: пользователь ────────────────────────────────────
+@dp.callback_query(F.data == "support_new")
+async def cb_support_new(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(SupportFSM.subject)
+    await callback.message.answer("📝 Введите тему обращения (коротко, 1 строка):")
+    await callback.answer()
+
+@dp.message(SupportFSM.subject)
+async def fsm_support_subject(message: types.Message, state: FSMContext):
+    await state.update_data(subject=message.text.strip())
+    await state.set_state(SupportFSM.message)
+    await message.answer("✉️ Опишите проблему подробнее:")
+
+@dp.message(SupportFSM.message)
+async def fsm_support_message(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    uid = message.from_user.id
+    uname = message.from_user.username or ""
+    is_sub, _ = find_user_data_in_sql(uid)
+    tid = create_ticket(uid, uname, is_sub, data["subject"], message.text.strip())
+    prio = "💎 PREMIUM" if is_sub else "🆓 FREE"
+    await message.answer(
+        "✅ <b>Обращение #" + str(tid) + " отправлено!</b>\\n\\n"
+        "Мы ответим в ближайшее время. Приоритет: " + prio,
+        parse_mode="HTML")
+    for adm_id in loging_id:
+        try:
+            await bot.send_message(adm_id,
+                "🎫 <b>Новый тикет #" + str(tid) + "</b>  " + prio + "\\n"
+                "👤 @" + uname + " (<code>" + str(uid) + "</code>)\\n"
+                "📌 " + data["subject"] + "\\n"
+                "💬 " + message.text.strip()[:200],
+                parse_mode="HTML")
+        except: pass
+
+# ─── Тех. поддержка: admin ───────────────────────────────────────────
+@dp.callback_query(F.data == "adm_tickets")
+async def cb_adm_tickets(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == "True"):
+        await callback.answer("❌", show_alert=True); return
+    total_t, open_t, prem_open = get_ticket_stats()
+    tickets = get_open_tickets()
+    lines = [
+        "🎫 <b>Тех. поддержка</b>\\n",
+        "Всего: <b>" + str(total_t) + "</b> | Открытых: <b>" + str(open_t) + "</b> | Premium открытых: <b>" + str(prem_open) + "</b>\\n",
+    ]
+    if not tickets:
+        lines.append("✅ Нет открытых тикетов")
+    else:
+        lines.append("─────────────────")
+        for tid, uid, uname, is_prem, subj, status, created in tickets[:15]:
+            prio = "💎" if is_prem else "🆓"
+            name = ("@" + uname) if uname else ("ID:" + str(uid))
+            lines.append(prio + " #" + str(tid) + " " + name + "\\n   " + subj[:50])
+    b = InlineKeyboardBuilder()
+    b.button(text="↩️ Ответить/закрыть тикет", callback_data="adm_ticket_reply")
+    b.button(text="📋 Все тикеты", callback_data="adm_tickets_all")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(1)
+    await callback.message.edit_text("\\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_ticket_reply")
+async def cb_adm_ticket_reply(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.ticket_reply)
+    await callback.message.answer("Введите: <номер_тикета> <ответ>\\nПример: 5 Проблема решена, попробуйте снова")
+    await callback.answer()
+
+@dp.message(AdminFSM.ticket_reply)
+async def fsm_ticket_reply(message: types.Message, state: FSMContext):
+    await state.clear()
+    parts = message.text.strip().split(" ", 1)
+    if len(parts) < 2:
+        await message.answer("❌ Формат: <id> <ответ>"); return
+    try:
+        tid = int(parts[0])
+    except:
+        await message.answer("❌ ID должен быть числом"); return
+    reply_text = parts[1]
+    ticket = get_ticket(tid)
+    if not ticket:
+        await message.answer("❌ Тикет #" + str(tid) + " не найден"); return
+    close_ticket(tid, message.from_user.id, reply_text)
+    uid = ticket[1]
+    try:
+        await bot.send_message(uid,
+            "📬 <b>Ответ на ваше обращение #" + str(tid) + "</b>\\n\\n" + reply_text + "\\n\\n"
+            "<i>Служба поддержки " + BOT_NAME + "</i>",
+            parse_mode="HTML")
+    except: pass
+    await message.answer("✅ Тикет #" + str(tid) + " закрыт, ответ отправлен.")
+
+@dp.callback_query(F.data == "adm_tickets_all")
+async def cb_adm_tickets_all(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id,user_id,username,is_premium,subject,status,created_at FROM support_tickets ORDER BY created_at DESC LIMIT 20")
+    rows = c.fetchall(); conn.close()
+    lines = ["📋 <b>Все тикеты (последние 20):</b>\\n"]
+    for tid, uid, uname, is_p, subj, status, created in rows:
+        prio = "💎" if is_p else "🆓"
+        st = "✅" if status == "closed" else "🔓"
+        name = ("@" + uname) if uname else ("ID:" + str(uid))
+        lines.append(st + prio + " #" + str(tid) + " " + name + " — " + subj[:40] + "  " + (created[:10] if created else ""))
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_tickets")
+    await callback.message.edit_text("\\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+# ─── История покупок: admin ───────────────────────────────────────────
+@dp.callback_query(F.data == "adm_purchases")
+async def cb_adm_purchases(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == "True"):
+        await callback.answer("❌", show_alert=True); return
+    count_24, sum_24 = get_purchase_stats(24)
+    count_7d, sum_7d = get_purchase_stats(24*7)
+    count_30d, sum_30d = get_purchase_stats(24*30)
+    history = get_purchase_history(limit=15)
+    lines = [
+        "🛒 <b>История покупок</b>\\n",
+        "За 24ч: <b>" + str(count_24) + "</b> покупок / <b>" + str(sum_24) + "⭐</b>",
+        "За 7 дней: <b>" + str(count_7d) + "</b> / <b>" + str(sum_7d) + "⭐</b>",
+        "За 30 дней: <b>" + str(count_30d) + "</b> / <b>" + str(sum_30d) + "⭐</b>\\n",
+        "─────────────────",
+    ]
+    for row2 in history:
+        pid, uid, st, days, label, promo, disc, created, uname = row2[0], row2[1], row2[2], row2[3], row2[4], row2[5], row2[6], row2[7], row2[9] if len(row2) > 9 else ""
+        name = ("@" + uname) if uname else ("ID:" + str(uid))
+        promo_str = " 🎟" + str(promo) if promo else ""
+        lines.append("• " + name + " — " + str(st) + "⭐ " + (label or "") + promo_str + " | " + (created[:10] if created else ""))
+    b = InlineKeyboardBuilder()
+    b.button(text="👤 Покупки пользователя", callback_data="adm_user_purchases")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(1)
+    await callback.message.edit_text("\\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_user_purchases")
+async def cb_adm_user_purchases(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="user_purchases")
+    await callback.message.answer("Введите ID пользователя:")
+    await callback.answer()
+
+# ─── Графики: admin ───────────────────────────────────────────────────
+# ── Chart helpers ─────────────────────────────────────────────────────────────
+
+def _period_kb(type_key: str):
+    """Keyboard with period options for a given chart type."""
+    b = InlineKeyboardBuilder()
+    for lbl, p in [("1ч","hour"),("24ч","day"),("7д","week"),
+                   ("1м","month"),("3м","quarter"),("1г","year")]:
+        b.button(text=lbl, callback_data=f"adm_chart_{type_key}_{p}")
+    b.button(text="⬅️ Назад", callback_data="adm_charts")
+    b.adjust(3)
+    return b.as_markup()
+
+def _get_buckets(table: str, ts_col: str, period: str,
+                 extra_where: str = "", val_col: str = None) -> dict:
+    """Generic time-bucketed counter from any table."""
+    ph = {"hour":(1,"%H:%M"),"day":(24,"%H:00"),"week":(168,"%d.%m"),
+          "month":(720,"%d.%m"),"quarter":(2160,"%m.%Y"),"year":(8760,"%m.%Y")}
+    hours, fmt = ph.get(period, (168, "%d.%m"))
+    since = (datetime.datetime.now() - datetime.timedelta(hours=hours)).isoformat()
+    where = f"WHERE {ts_col} >= '{since}'"
+    if extra_where:
+        where += f" AND {extra_where}"
+    sel = f"{ts_col},{val_col}" if val_col else ts_col
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(f"SELECT {sel} FROM {table} {where} ORDER BY {ts_col}")
+    rows = c.fetchall(); conn.close()
+    buckets: dict = {}
+    for row in rows:
+        try:
+            dt = datetime.datetime.fromisoformat(row[0])
+            key = dt.strftime(fmt)
+            val = (row[1] or 0) if val_col else 1
+            buckets[key] = buckets.get(key, 0) + val
+        except Exception:
+            pass
+    return buckets
+
+def _bar_chart(title: str, buckets: dict, suffix: str = "", width: int = 10) -> str:
+    if not buckets:
+        return title + "\n\n<i>Нет данных за этот период</i>"
+    items = list(buckets.items())[-20:]
+    mx = max(v for _, v in items) or 1
+    lines = [title + "\n"]
+    for lbl, val in items:
+        filled = round(val / mx * width)
+        bar = "█" * filled + "░" * (width - filled)
+        lines.append(f"<code>{lbl[:7].ljust(7)} |{bar}| {val}{suffix}</code>")
+    return "\n".join(lines)
+
+# ── Chart callbacks ────────────────────────────────────────────────────────────
+
+@dp.callback_query(F.data == "adm_charts")
+async def cb_adm_charts(callback: types.CallbackQuery):
+    if not has_perm(callback.from_user.id, "moderator"):
+        await callback.answer("❌ Нет прав", show_alert=True); return
+    b = InlineKeyboardBuilder()
+    b.button(text="👥 Регистрации",  callback_data="adm_chart_type_reg")
+    b.button(text="💰 Покупки",      callback_data="adm_chart_type_purchases")
+    b.button(text="👥 Рефералы",     callback_data="adm_chart_type_refs")
+    b.button(text="🎟 Промокоды",    callback_data="adm_chart_type_promos")
+    b.button(text="🎫 Тикеты",       callback_data="adm_chart_type_tickets")
+    b.button(text="🔢 Команды",      callback_data="adm_chart_cmds")
+    b.button(text="⬅️ Назад",        callback_data="adm_main")
+    b.adjust(2)
+    await callback.message.edit_text(
+        "📈 <b>Графики</b>\n\nВыберите тип статистики:",
+        reply_markup=b.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("adm_chart_type_"))
+async def cb_adm_chart_type(callback: types.CallbackQuery):
+    type_key = callback.data.replace("adm_chart_type_", "")
+    names = {"reg": "👥 Регистрации", "purchases": "💰 Покупки",
+             "refs": "👥 Рефералы", "promos": "🎟 Промокоды", "tickets": "🎫 Тикеты"}
+    await callback.message.edit_text(
+        f"📈 <b>{names.get(type_key, type_key)}</b>\n\nВыберите период:",
+        reply_markup=_period_kb(type_key), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("adm_chart_reg_"))
+async def cb_adm_chart_reg(callback: types.CallbackQuery):
+    period = callback.data.replace("adm_chart_reg_", "")
+    buckets = _get_buckets("registrations", "registered_at", period)
+    text = _bar_chart("📊 <b>Регистрации</b>", buckets)
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_chart_type_reg")
+    await callback.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("adm_chart_purchases_"))
+async def cb_adm_chart_purchases_period(callback: types.CallbackQuery):
+    period = callback.data.replace("adm_chart_purchases_", "")
+    cnt_b = _get_buckets("purchases", "created_at", period)
+    star_b = _get_buckets("purchases", "created_at", period, val_col="stars")
+    if not cnt_b:
+        await callback.answer("Нет данных за этот период", show_alert=True); return
+    items = list(cnt_b.items())[-14:]
+    mx = max(v for _, v in items) or 1
+    lines = ["💰 <b>Покупки</b>\n"]
+    for key, cnt in items:
+        filled = round(cnt / mx * 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        lines.append(f"<code>{key.ljust(6)} |{bar}| {cnt}шт {star_b.get(key,0)}⭐</code>")
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_chart_type_purchases")
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("adm_chart_refs_"))
+async def cb_adm_chart_refs(callback: types.CallbackQuery):
+    period = callback.data.replace("adm_chart_refs_", "")
+    all_b  = _get_buckets("referrals", "created_at", period)
+    paid_b = _get_buckets("referrals", "created_at", period, extra_where="paid=1")
+    if not all_b:
+        await callback.answer("Нет данных за этот период", show_alert=True); return
+    items = list(all_b.items())[-20:]
+    mx = max(v for _, v in items) or 1
+    lines = ["👥 <b>Рефералы</b>\n"]
+    for key, cnt in items:
+        filled = round(cnt / mx * 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        lines.append(f"<code>{key.ljust(6)} |{bar}| {cnt} ({paid_b.get(key,0)}💰)</code>")
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_chart_type_refs")
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("adm_chart_promos_"))
+async def cb_adm_chart_promos(callback: types.CallbackQuery):
+    period = callback.data.replace("adm_chart_promos_", "")
+    buckets = _get_buckets("promo_uses", "used_at", period)
+    text = _bar_chart("🎟 <b>Активации промокодов</b>", buckets)
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_chart_type_promos")
+    await callback.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("adm_chart_tickets_"))
+async def cb_adm_chart_tickets(callback: types.CallbackQuery):
+    period = callback.data.replace("adm_chart_tickets_", "")
+    all_b    = _get_buckets("support_tickets", "created_at", period)
+    closed_b = _get_buckets("support_tickets", "created_at", period, extra_where="status='closed'")
+    if not all_b:
+        await callback.answer("Нет данных за этот период", show_alert=True); return
+    items = list(all_b.items())[-20:]
+    mx = max(v for _, v in items) or 1
+    lines = ["🎫 <b>Тикеты</b>\n"]
+    for key, cnt in items:
+        filled = round(cnt / mx * 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        lines.append(f"<code>{key.ljust(6)} |{bar}| {cnt} ({closed_b.get(key,0)}✅)</code>")
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_chart_type_tickets")
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "adm_chart_cmds")
+async def cb_adm_chart_cmds(callback: types.CallbackQuery):
+    stats = get_command_stats(20)
+    if not stats:
+        await callback.answer("Нет данных", show_alert=True); return
+    max_v = stats[0][1] if stats else 1
+    lines = ["🔢 <b>Топ команд за всё время:</b>\n"]
+    for cmd, cnt in stats:
+        filled = round(cnt / max_v * 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        lines.append(f"<code>{cmd[:12].ljust(12)} |{bar}| {cnt}</code>")
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_charts")
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "adm_promos")
 async def cb_adm_promos(callback: types.CallbackQuery):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
-    if not (row and row[0] == "True"):
-        await callback.answer("❌", show_alert=True)
+    if not has_perm(callback.from_user.id, "moderator"):
+        await callback.answer("❌ Нет прав", show_alert=True)
         return
     conn2 = sqlite3.connect(DB_PATH)
     c2 = conn2.cursor()
@@ -2125,6 +3450,7 @@ async def cb_adm_promos(callback: types.CallbackQuery):
     b = InlineKeyboardBuilder()
     b.button(text="➕ Создать", callback_data="adm_promo_create")
     b.button(text="❌ Деактивировать", callback_data="adm_promo_deact")
+    b.button(text="🔄 Заменить промокод", callback_data="adm_promo_replace")
     b.button(text="🔍 Детали кода", callback_data="adm_promo_detail")
     b.button(text="⬅️ Назад", callback_data="adm_main")
     b.adjust(2)
@@ -2143,8 +3469,8 @@ async def cb_adm_promo_create(callback: types.CallbackQuery, state: FSMContext):
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
-    if not (row and row[0] == "True"):
-        await callback.answer("❌", show_alert=True)
+    if not has_perm(callback.from_user.id, "moderator"):
+        await callback.answer("❌ Нет прав", show_alert=True)
         return
     await state.set_state(AdminFSM.promo_create)
     lines_ex = [
@@ -2230,6 +3556,20 @@ async def cb_adm_promo_deact(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите код промокода для деактивации:")
     await callback.answer()
 
+@dp.callback_query(F.data == "adm_promo_replace")
+async def cb_adm_promo_replace(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="replace_promo")
+    await callback.message.answer(
+        "🔄 <b>Замена промокода</b>\n\n"
+        "Введите две строки:\n"
+        "<code>СТАРЫЙ_КОД</code>\n"
+        "<code>НОВЫЙ_КОД</code>\n\n"
+        "Старый будет деактивирован, у всех пользователей "
+        "активируется новый.",
+        parse_mode="HTML")
+    await callback.answer()
+
 @dp.callback_query(F.data == "adm_ref_user")
 async def cb_adm_ref_user(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.promo_code_input)
@@ -2249,6 +3589,29 @@ async def fsm_promo_code_input(message: types.Message, state: FSMContext):
             await message.answer("✅ Промокод <code>" + code + "</code> деактивирован.", parse_mode="HTML")
         else:
             await message.answer("❌ Промокод <code>" + code + "</code> не найден.", parse_mode="HTML")
+    elif action == "replace_promo":
+        lines_rp = [l.strip() for l in message.text.strip().splitlines() if l.strip()]
+        if len(lines_rp) < 2:
+            await message.answer("❌ Нужно две строки: старый код и новый код"); return
+        old_code, new_code = lines_rp[0].upper(), lines_rp[1].upper()
+        old_p = get_promo(old_code)
+        new_p = get_promo(new_code)
+        if not old_p:
+            await message.answer(f"❌ Промокод <code>{old_code}</code> не найден или неактивен.", parse_mode="HTML"); return
+        if not new_p:
+            await message.answer(f"❌ Промокод <code>{new_code}</code> не найден или неактивен.", parse_mode="HTML"); return
+        deactivate_promo(old_code)
+        conn_rp = sqlite3.connect(DB_PATH)
+        c_rp = conn_rp.cursor()
+        c_rp.execute("UPDATE users SET active_promo=?, promo_expires=? WHERE active_promo=?",
+                     (new_code, new_p["expires_at"], old_code))
+        affected = c_rp.rowcount
+        conn_rp.commit(); conn_rp.close()
+        await message.answer(
+            f"✅ <b>Промокод заменён!</b>\n"
+            f"<code>{old_code}</code> → <code>{new_code}</code>\n"
+            f"Обновлено пользователей: <b>{affected}</b>",
+            parse_mode="HTML")
     elif action == "detail":
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -2326,6 +3689,123 @@ async def fsm_promo_code_input(message: types.Message, state: FSMContext):
             status2 = "✅" if is_paid else "⏳"
             lines_u.append(status2 + " " + nm + " +" + str(rew or 0) + "⭐ | " + (created[:10] if created else "—"))
         await message.answer("\n".join(lines_u), parse_mode="HTML")
+    elif action == "user_purchases":
+        try:
+            uid_p = int(code)
+        except:
+            await message.answer("❌ ID должен быть числом"); return
+        rows_p = get_purchase_history(user_id=uid_p, limit=20)
+        if not rows_p:
+            await message.answer("Покупок не найдено."); return
+        lines_p = ["🛒 <b>Покупки ID:" + str(uid_p) + "</b>\n"]
+        for row_p in rows_p:
+            pid, uid2, st, days2, label, promo2, disc2, created2 = row_p[:8]
+            promo_s = " 🎟" + str(promo2) if promo2 else ""
+            lines_p.append("• " + str(st) + "⭐ " + (label or "") + promo_s + " | " + (created2[:10] if created2 else ""))
+        await message.answer("\n".join(lines_p), parse_mode="HTML")
+    elif action == "givesub":
+        parts = code.split()
+        if len(parts) < 2:
+            await message.answer("❌ Формат: ID дней"); return
+        try:
+            uid_g = int(parts[0]); days_g = int(parts[1])
+        except:
+            await message.answer("❌ ID и дни должны быть числами"); return
+        expiry_g = grant_subscription(uid_g, days_g)
+        log_purchase(uid_g, 0, days_g, "Admin gift", None, 0)
+        await message.answer("✅ Подписка выдана <code>" + str(uid_g) + "</code> до <b>" + expiry_g + "</b>", parse_mode="HTML")
+        try:
+            await bot.send_message(uid_g,
+                "🎁 <b>Вам выдана подписка!</b>\n📅 Действует до: <b>" + expiry_g + "</b>",
+                parse_mode="HTML")
+        except: pass
+    elif action == "role_assign":
+        data2 = await state.get_data() if False else {}
+        parts_r = code.split()
+        if len(parts_r) < 2:
+            await message.answer("❌ Формат: ID роль"); return
+        try:
+            uid_r = int(parts_r[0])
+        except:
+            await message.answer("❌ ID должен быть числом"); return
+        role_r = parts_r[1].lower()
+        if role_r not in ROLES:
+            await message.answer("❌ Роли: moderator, admin, developer"); return
+        assigner_lvl = get_role_level(message.from_user.id)
+        target_lvl = ROLES.get(role_r, {}).get("level", 0)
+        if target_lvl >= assigner_lvl:
+            await message.answer("❌ Нельзя назначить роль равную или выше вашей"); return
+        if set_role(uid_r, role_r, message.from_user.id):
+            rl = ROLES[role_r]["label"]
+            await message.answer("✅ Пользователю <code>" + str(uid_r) + "</code> назначена роль " + rl, parse_mode="HTML")
+            try:
+                await bot.send_message(uid_r, "👑 Вам назначена роль <b>" + rl + "</b> в " + BOT_NAME, parse_mode="HTML")
+            except: pass
+        else:
+            await message.answer("❌ Пользователь не найден в БД")
+    elif action == "role_remove":
+        try:
+            uid_rm = int(code)
+        except:
+            await message.answer("❌ ID должен быть числом"); return
+        assigner_lvl = get_role_level(message.from_user.id)
+        cur_role = get_role(uid_rm)
+        cur_lvl = ROLES.get(cur_role, {}).get("level", 0)
+        if cur_lvl >= assigner_lvl:
+            await message.answer("❌ Нельзя снять роль равную или выше вашей"); return
+        set_role(uid_rm, "none", message.from_user.id)
+        await message.answer("✅ Роль снята с пользователя <code>" + str(uid_rm) + "</code>", parse_mode="HTML")
+    elif action == "prank_create":
+        lines_pc = [l.strip() for l in code.split("\n")]
+        if len(lines_pc) < 4:
+            await message.answer("❌ Нужно 4 строки: вопрос, режим, варианты, реальные варианты"); return
+        q_pc = lines_pc[0]
+        mode_pc = lines_pc[1].lower()
+        if mode_pc not in ("remap", "void", "reveal"):
+            await message.answer("❌ Режим: remap / void / reveal"); return
+        real_opts = [o.strip() for o in lines_pc[2].split(",") if o.strip()]
+        mapped_opts = [o.strip() for o in lines_pc[3].split(",") if o.strip()]
+        if len(real_opts) < 2:
+            await message.answer("❌ Минимум 2 варианта"); return
+        pid_pc = create_prank_poll(q_pc, real_opts, mapped_opts, mode_pc, message.from_user.id)
+        b_pc = InlineKeyboardBuilder()
+        for i, opt in enumerate(real_opts):
+            b_pc.button(text=opt, callback_data="prank_vote_" + str(pid_pc) + "_" + str(i))
+        b_pc.adjust(1)
+        conn_pc = sqlite3.connect(DB_PATH)
+        cur_pc = conn_pc.cursor()
+        cur_pc.execute("SELECT chat_id FROM users WHERE banned!='True'")
+        users_pc = [r[0] for r in cur_pc.fetchall()]; conn_pc.close()
+        sent_pc = 0
+        for uid_pc in users_pc:
+            try:
+                await bot.send_message(uid_pc, "🃏 <b>" + q_pc + "</b>", reply_markup=b_pc.as_markup(), parse_mode="HTML")
+                sent_pc += 1
+            except: pass
+            await asyncio.sleep(0.05)
+        await message.answer("✅ Пранк-опрос #" + str(pid_pc) + " разослан " + str(sent_pc) + " пользователям.")
+    elif action == "prank_detail":
+        try:
+            pid_d = int(code)
+        except:
+            await message.answer("❌ ID опроса"); return
+        poll_d = get_prank_poll(pid_d)
+        if not poll_d:
+            await message.answer("❌ Опрос не найден"); return
+        stats_d = get_prank_poll_stats(pid_d)
+        total_v = sum(stats_d.values()) or 1
+        lines_d = [
+            "🃏 <b>Пранк-опрос #" + str(pid_d) + "</b>",
+            "Вопрос: " + poll_d["question"],
+            "Режим: " + poll_d["mode"],
+            "Голосов: " + str(len(poll_d["votes_json"])) + "\n",
+            "📊 <b>Реальные результаты:</b>"
+        ]
+        for opt, cnt in stats_d.items():
+            pct = round(cnt / total_v * 100)
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            lines_d.append(opt[:25] + ": " + bar + " " + str(pct) + "% (" + str(cnt) + ")")
+        await message.answer("\n".join(lines_d), parse_mode="HTML")
 
 @dp.callback_query(F.data == "adm_ref_stats")
 async def cb_adm_ref_stats(callback: types.CallbackQuery):
@@ -2333,8 +3813,8 @@ async def cb_adm_ref_stats(callback: types.CallbackQuery):
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
-    if not (row and row[0] == "True"):
-        await callback.answer("❌", show_alert=True)
+    if not has_perm(callback.from_user.id, "moderator"):
+        await callback.answer("❌ Нет прав", show_alert=True)
         return
     conn2 = sqlite3.connect(DB_PATH)
     c2 = conn2.cursor()
@@ -2413,6 +3893,29 @@ async def _doc_inner(message: types.Message, state: FSMContext):
         secs = max(0, int(blocked_until - time.time()))
         await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
 
+    file_ok, file_blocked_until = check_file_antispam(user_id, is_paid=is_subscribed)
+    if not file_ok:
+        secs = max(0, int(file_blocked_until - time.time()))
+        await message.answer(
+            f"🛑 <b>Слишком много файлов!</b> Лимит: {FILE_ANTISPAM_LIMIT} файла за {FILE_ANTISPAM_WINDOW} сек.\n"
+            f"Подождите <b>{secs} сек.</b>", parse_mode="HTML"); return
+
+    # ── Batch collection mode ─────────────────────────────────────
+    if current_state == BatchFSM.collecting.state:
+        file_id_b = message.document.file_id
+        file_name_b = message.document.file_name
+        added = add_batch_file(user_id, file_id_b, file_name_b)
+        if added:
+            batch_now = get_batch(user_id)
+            cnt_b = len(batch_now.get("files", []))
+            await message.answer(
+                f"📎 Файл <b>{cnt_b}</b> добавлен: <code>{file_name_b}</code>\n"
+                "Отправь ещё или введи <code>/stopbatch</code>",
+                parse_mode="HTML")
+        else:
+            await message.answer("❌ Сначала запусти <code>/batch &lt;команда&gt;</code>", parse_mode="HTML")
+        return
+
     if not is_subscribed:
         not_sub = await check_required_subs(user_id)
         if not_sub:
@@ -2443,6 +3946,23 @@ async def _doc_inner(message: types.Message, state: FSMContext):
             except: pass
 
     asyncio.create_task(auto_cleanup())
+
+    _timeout_task: asyncio.Task = None
+
+    async def _file_timeout_watcher():
+        if is_subscribed:
+            return
+        await asyncio.sleep(FREE_TIMEOUT_SEC)
+        try:
+            await message.answer(
+                "⏱ <b>Обработка затянулась!</b>\n\n"
+                "Файл обрабатывается дольше обычного.\n"
+                "💎 Premium-пользователи не имеют этого ограничения.",
+                parse_mode="HTML")
+        except Exception:
+            pass
+
+    _timeout_task = asyncio.create_task(_file_timeout_watcher())
 
     try:
         if 'boti' in globals() and 'loging_id' in globals():
@@ -3058,6 +4578,8 @@ async def _doc_inner(message: types.Message, state: FSMContext):
                 finally: await y.delete()
 
     finally:
+        if _timeout_task and not _timeout_task.done():
+            _timeout_task.cancel()
         await queue_release(is_subscribed)
 
 @dp.message(F.photo)
@@ -3137,7 +4659,24 @@ async def _ok_inner(message: types.Message):
             b.button(text="🔧 Открыть палитру HEX", web_app=types.WebAppInfo(url="https://csscolor.ru"))
             await message.answer(start_paid_text(expiry_date_value or "—"), reply_markup=b.as_markup(), parse_mode='HTML')
         else:
-            await message.answer(start_free_text(), reply_markup=kb_subscription_plans(), parse_mode='HTML')
+            ref_disc = get_buyer_discount(user_id)
+            if ref_disc > 0:
+                await message.answer(
+                    "👥 <b>Вас пригласил друг!</b> Скидка <b>-" + str(ref_disc) + "%</b> уже применена к тарифам 🎉",
+                    parse_mode="HTML")
+            if can_use_trial(user_id):
+                b_trial = InlineKeyboardBuilder()
+                b_trial.button(text="⚡ Попробовать 3 дня за 1⭐", callback_data="buy_trial")
+                b_trial.button(text="💎 Посмотреть тарифы", callback_data="show_plans")
+                b_trial.adjust(1)
+                await message.answer(
+                    "👋 <b>Добро пожаловать в " + BOT_NAME + "!</b>\n\n"
+                    "🎁 <b>Специальное предложение для новых пользователей:</b>\n"
+                    "3 дня Premium всего за <b>1⭐</b>\n\n"
+                    "После пробного периода выберете удобный тариф.",
+                    reply_markup=b_trial.as_markup(), parse_mode="HTML")
+            else:
+                await message.answer(start_free_text(), reply_markup=kb_subscription_plans(), parse_mode='HTML')
         return
 
     if "/mysub" in message.text:
@@ -3166,14 +4705,15 @@ async def _ok_inner(message: types.Message):
         if not (row and row[0] == 'True'):
             await message.answer("❌ Нет прав."); return
         s = get_bot_stats()
-        text = (f"🛠 <b>Панель администратора</b>\n\n"
+        role_label = ROLES.get(get_role(user_id), {}).get("label", "👤 Стафф")
+        text = (f"🛠 <b>Панель {role_label}</b>\n\n"
                 f"👥 Всего пользователей: <b>{s['total']}</b>\n"
                 f"💎 Premium: <b>{s['paid']}</b>\n"
                 f"🆓 Бесплатных: <b>{s['free']}</b>\n"
                 f"🚫 Заблокировано: <b>{s['banned']}</b>\n"
                 f"📅 Активно сегодня: <b>{s['today']}</b>\n"
                 f"💾 Work-папка: <b>{get_work_size_gb():.2f} ГБ</b>")
-        await message.answer(text, reply_markup=kb_admin_main(), parse_mode="HTML"); return
+        await message.answer(text, reply_markup=kb_admin_main(user_id), parse_mode="HTML"); return
 
     if message.text.startswith("/addchannel"):
         conn = sqlite3.connect(DB_PATH)
@@ -3679,7 +5219,40 @@ async def _ok_inner(message: types.Message):
             _, _, bal = get_ref_stats(user_id)
             await message.answer(
                 "💰 <b>Реферальный баланс: " + str(bal) + " ⭐</b>\n\n"
-                "Для вывода напишите @keedboy016", parse_mode="HTML")
+                "Для вывода напишите @" + SUPPORT_USERNAME, parse_mode="HTML")
+
+        elif "/batch" in message.text:
+            parts_b = message.text.split(None, 2)
+            if len(parts_b) < 2:
+                await message.answer(
+                    "📦 <b>Пакетная обработка</b>\n\n"
+                    "Формат: <code>/batch &lt;команда&gt; [подпись]</code>\n"
+                    "Затем отправляй файлы по одному.\n"
+                    "Для обработки — <code>/stopbatch</code>\n\n"
+                    "Пример: <code>/batch /color #FF0000</code>",
+                    parse_mode="HTML"); return
+            batch_cmd = parts_b[1]
+            batch_cap = parts_b[2] if len(parts_b) > 2 else batch_cmd
+            start_batch(user_id, batch_cmd, batch_cap)
+            await state.set_state(BatchFSM.collecting)
+            await message.answer(
+                "✅ <b>Пакетный режим запущен!</b>\n\n"
+                "Команда: <code>" + batch_cmd + "</code>\n"
+                "Отправляй файлы. Когда закончишь — <code>/stopbatch</code>",
+                parse_mode="HTML")
+
+        elif "/stopbatch" in message.text:
+            batch = get_batch(user_id)
+            if not batch:
+                await message.answer("❌ Нет активной пакетной сессии."); return
+            files_list = batch.get("files", [])
+            clear_batch(user_id)
+            await state.clear()
+            if not files_list:
+                await message.answer("❌ Файлы не получены, сессия отменена."); return
+            await message.answer(
+                f"⏳ <b>Обрабатываю {len(files_list)} файл(ов)…</b>\n"
+                "Результаты придут по мере готовности.", parse_mode="HTML")
 
         elif "/ref" in message.text:
             ref_link_u = get_ref_link(user_id)
@@ -3701,6 +5274,34 @@ async def _ok_inner(message: types.Message):
                 "  1+ → -10% | 10+ → -15% | 20+ → -20% | 50+ → -25%\n\n"
                 "Вы получаете <b>15%</b> от покупки реферала ⭐",
                 parse_mode="HTML")
+
+        elif "/support" in message.text:
+            is_prem = is_subscribed
+            b_sup = InlineKeyboardBuilder()
+            b_sup.button(text="📝 Создать обращение", callback_data="support_new")
+            await message.answer(
+                "🎫 <b>Техническая поддержка " + BOT_NAME + "</b>\n\n"
+                + ("💎 Premium-пользователи обслуживаются приоритетно.\n\n" if is_prem else "")
+                + "Нажмите кнопку ниже чтобы создать обращение.\n"
+                "Или напишите напрямую: @" + SUPPORT_USERNAME,
+                reply_markup=b_sup.as_markup(), parse_mode="HTML")
+
+        elif "/review" in message.text:
+            parts_rv = message.text.split(None, 2)
+            if len(parts_rv) < 2:
+                await message.answer(
+                    "⭐ <b>Оставить отзыв</b>\n\nФормат: <code>/review 5 Отличный бот!</code>\nОценка от 1 до 5",
+                    parse_mode="HTML"); return
+            try:
+                rating_rv = int(parts_rv[1])
+                if not 1 <= rating_rv <= 5:
+                    raise ValueError
+            except:
+                await message.answer("❌ Оценка должна быть от 1 до 5"); return
+            text_rv = parts_rv[2] if len(parts_rv) > 2 else ""
+            add_review(user_id, rating_rv, text_rv)
+            stars_rv = "⭐" * rating_rv
+            await message.answer("✅ <b>Спасибо за отзыв!</b> " + stars_rv, parse_mode="HTML")
 
         elif "/help" in message.text:
             await message.answer("""<b>Привет👋 Вот возможности бота:</b>
