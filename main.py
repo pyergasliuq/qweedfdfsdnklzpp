@@ -54,7 +54,6 @@ boti = Bot(token=os.getenv("token2"))
 length = 4
 DB_PATH = 'users.db'
 
-# ─── Freemium константы ───────────────────────────────────────────────
 FREE_MAX_FILE_MB = 20
 FREE_DELAY_SEC = 10
 MAX_WORK_SIZE_GB = 1.5
@@ -64,12 +63,12 @@ ANTISPAM_BLOCK_SEC = 45
 DEFAULT_CHANNELS = ['@pweper', '@nonerai', '@noberai_team']
 
 SUBSCRIPTION_PLANS = [
-    {"stars": 50,   "days": 14,   "label": "2 недели",  "emoji": "⚡"},
-    {"stars": 80,   "days": 30,   "label": "1 месяц",   "emoji": "🔥"},
-    {"stars": 200,  "days": 90,   "label": "3 месяца",  "emoji": "💎"},
-    {"stars": 350,  "days": 180,  "label": "6 месяцев", "emoji": "👑"},
-    {"stars": 600,  "days": 365,  "label": "1 год",     "emoji": "🏆"},
-    {"stars": 1000, "days": -1,   "label": "Навсегда",  "emoji": "♾️"},
+    {"stars": 50, "days": 14, "label": "2 недели", "emoji": "⚡"},
+    {"stars": 80, "days": 30, "label": "1 месяц", "emoji": "🔥"},
+    {"stars": 200, "days": 90, "label": "3 месяца", "emoji": "💎"},
+    {"stars": 350, "days": 180, "label": "6 месяцев", "emoji": "👑"},
+    {"stars": 600, "days": 365, "label": "1 год", "emoji": "🏆"},
+    {"stars": 1000, "days": -1, "label": "Навсегда", "emoji": "♾️"},
 ]
 
 FILE_SUFFIXES = ['logobrkrasnodar', 'logobrkaliningrad', 'logobrbelgorod', 'logobrizhevsk', 'logobrgray',
@@ -146,33 +145,38 @@ PRESETS = {
 }
 weapon_user_settings: dict[int, str] = {}
 
-# ─── FSM States ───────────────────────────────────────────────────────
 class OverlayStates(StatesGroup):
     waiting_for_second_image = State()
 
 class AdminFSM(StatesGroup):
-    broadcast_text  = State()
-    poll_question   = State()
-    poll_options    = State()
-    unban_id        = State()
+    broadcast_text = State()
+    poll_question = State()
+    poll_options = State()
+    unban_id = State()
+    promo_create = State()
+    promo_code_input = State()
 
-# ─── Очередь ──────────────────────────────────────────────────────────
+class BuyFSM(StatesGroup):
+    waiting_promo = State()
+
 _active_paid = 0
-_active_paid_lock = asyncio.Lock()
+_active_paid_lock = None
 _free_semaphore = None
 _paid_semaphore = None
 
 def init_semaphores():
-    global _free_semaphore, _paid_semaphore
+    global _free_semaphore, _paid_semaphore, _active_paid_lock
+    _active_paid_lock = asyncio.Lock()
     _free_semaphore = asyncio.Semaphore(2)
     _paid_semaphore = asyncio.Semaphore(8)
 
 async def queue_acquire(is_paid: bool):
     global _active_paid
+    if _free_semaphore is None:
+        return
     if is_paid:
         async with _active_paid_lock:
             _active_paid += 1
-        await _paid_semaphore.acquire()
     else:
         if _active_paid > 0:
             await asyncio.sleep(FREE_DELAY_SEC)
@@ -182,15 +186,17 @@ async def queue_acquire(is_paid: bool):
 
 async def queue_release(is_paid: bool):
     global _active_paid
+    if _free_semaphore is None:
+        return
     if is_paid:
         async with _active_paid_lock:
             _active_paid = max(0, _active_paid - 1)
-        _paid_semaphore.release()
     else:
         _free_semaphore.release()
 
-# ─── Антиспам ─────────────────────────────────────────────────────────
-def check_antispam(user_id: int):
+def check_antispam(user_id: int, is_paid: bool = False):
+    if is_paid:
+        return True, 0.0
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = time.time()
@@ -216,7 +222,6 @@ def check_antispam(user_id: int):
     conn.commit(); conn.close()
     return True, 0.0
 
-# ─── Каналы ───────────────────────────────────────────────────────────
 def get_required_channels():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -250,7 +255,6 @@ async def check_required_subs(user_id: int):
             logging.warning(f"check_required_subs {ch}: {e}")
     return not_sub
 
-# ─── Баны ─────────────────────────────────────────────────────────────
 def is_banned(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -273,7 +277,6 @@ def unban_user(user_id: int):
     c.execute("UPDATE users SET banned='False', ban_reason=NULL WHERE chat_id=?", (user_id,))
     conn.commit(); conn.close()
 
-# ─── Активность ───────────────────────────────────────────────────────
 def inc_msg_count(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -300,7 +303,6 @@ def get_bot_stats():
     conn.close()
     return {"total": total, "paid": paid, "free": total-paid, "banned": banned, "today": today_active}
 
-# ─── Work-директория: автоочистка ─────────────────────────────────────
 def get_work_size_gb():
     total = 0
     p = Path('work')
@@ -327,7 +329,6 @@ async def auto_cleanup():
             break
         shutil.rmtree(d, ignore_errors=True)
 
-# ─── Stars: подписки ──────────────────────────────────────────────────
 def save_invoice(payload: str, user_id: int, stars: int, days: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -356,6 +357,178 @@ def grant_subscription(user_id: int, days: int):
     conn.commit(); conn.close()
     return expiry
 
+def create_promo(code, name, comment, link, discount_pct, custom_stars,
+                 custom_days, max_uses, expires_at, created_by):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = datetime.datetime.now().isoformat()
+    try:
+        c.execute("""INSERT INTO promo_codes
+            (code,name,comment,link,discount_pct,custom_stars,custom_days,
+             max_uses,expires_at,is_active,created_by,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,1,?,?)""",
+            (code.upper(), name, comment, link, discount_pct, custom_stars,
+             custom_days, max_uses, expires_at, created_by, now))
+        conn.commit(); conn.close()
+        return True, None
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False, "Промокод уже существует"
+
+def get_promo(code):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM promo_codes WHERE code=? AND is_active=1", (code.upper(),))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    keys = ["id","code","name","comment","link","discount_pct","custom_stars",
+            "custom_days","max_uses","uses","expires_at","is_active","created_by","created_at"]
+    return dict(zip(keys, row))
+
+def list_promos():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT code,name,discount_pct,custom_stars,custom_days,uses,"
+              "max_uses,expires_at,is_active FROM promo_codes ORDER BY id DESC")
+    rows = c.fetchall(); conn.close()
+    return rows
+
+def deactivate_promo(code):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE promo_codes SET is_active=0 WHERE code=?", (code.upper(),))
+    ok = c.rowcount > 0; conn.commit(); conn.close()
+    return ok
+
+def use_promo(code, user_id):
+    p = get_promo(code)
+    if not p:
+        return False, None, "❌ Промокод не найден или неактивен"
+    if p["expires_at"]:
+        try:
+            if datetime.datetime.now() > datetime.datetime.fromisoformat(p["expires_at"]):
+                return False, None, "❌ Промокод истёк"
+        except:
+            pass
+    if p["max_uses"] > 0 and p["uses"] >= p["max_uses"]:
+        return False, None, "❌ Лимит использований исчерпан"
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO promo_uses (code,user_id,used_at) VALUES (?,?,?)",
+                  (code.upper(), user_id, datetime.datetime.now().isoformat()))
+        c.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=?", (code.upper(),))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False, None, "❌ Вы уже использовали этот промокод"
+    conn.close()
+    return True, p, None
+
+def apply_promo_to_plan(plan, promo):
+    if promo["custom_stars"] > 0:
+        return {**plan,
+                "stars": promo["custom_stars"],
+                "days": promo["custom_days"] if promo["custom_days"] > 0 else plan["days"],
+                "label": plan["label"] + " (промо)",
+                "emoji": "🎟"}
+    if promo["discount_pct"] > 0:
+        new_stars = max(1, int(plan["stars"] * (1 - promo["discount_pct"] / 100)))
+        return {**plan,
+                "stars": new_stars,
+                "label": plan["label"] + " -" + str(promo["discount_pct"]) + "%",
+                "emoji": "🎟"}
+    return plan
+
+REFERRAL_BONUS_TIERS = [(50, 25), (20, 20), (10, 15), (1, 10)]
+REFERRAL_REWARD_PCT = 15
+
+def get_ref_link(user_id):
+    import base64
+    token = base64.urlsafe_b64encode(str(user_id).encode()).decode().rstrip("=")
+    return "https://t.me/pweper_bot?start=ref_" + token
+
+def decode_ref_token(token):
+    import base64
+    try:
+        padding = 4 - len(token) % 4
+        return int(base64.urlsafe_b64decode(token + "=" * padding).decode())
+    except:
+        return None
+
+def register_referral(referrer_id, referred_id):
+    if referrer_id == referred_id:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT OR IGNORE INTO referrals (referrer_id,referred_id,created_at) VALUES (?,?,?)",
+                  (referrer_id, referred_id, datetime.datetime.now().isoformat()))
+        c.execute("UPDATE users SET referred_by=? WHERE chat_id=? AND (referred_by IS NULL OR referred_by='')",
+                  (str(referrer_id), referred_id))
+        conn.commit()
+    except:
+        pass
+    conn.close()
+
+def count_paid_referrals(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND paid=1", (user_id,))
+    n = c.fetchone()[0]; conn.close()
+    return n
+
+def get_buyer_discount(referred_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT referred_by FROM users WHERE chat_id=?", (referred_id,))
+    row = c.fetchone(); conn.close()
+    if not row or not row[0]:
+        return 0
+    try:
+        referrer_id = int(row[0])
+    except:
+        return 0
+    paid_refs = count_paid_referrals(referrer_id)
+    for min_r, disc in REFERRAL_BONUS_TIERS:
+        if paid_refs >= min_r:
+            return disc
+    return 10
+
+def mark_referral_paid(referred_id, stars_paid):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT referrer_id FROM referrals WHERE referred_id=? AND paid=0", (referred_id,))
+    row = c.fetchone()
+    if row:
+        referrer_id = row[0]
+        reward = max(1, int(stars_paid * REFERRAL_REWARD_PCT / 100))
+        c.execute("UPDATE referrals SET paid=1, reward_given=? WHERE referred_id=?",
+                  (reward, referred_id))
+        c.execute("""UPDATE users SET
+            ref_balance=CAST(COALESCE(CAST(ref_balance AS INTEGER),0)+? AS TEXT)
+            WHERE chat_id=?""", (reward, referrer_id))
+        conn.commit(); conn.close()
+        return referrer_id, reward
+    conn.close()
+    return None, 0
+
+def get_ref_stats(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
+    total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND paid=1", (user_id,))
+    paid = c.fetchone()[0]
+    c.execute("SELECT COALESCE(CAST(ref_balance AS INTEGER),0) FROM users WHERE chat_id=?",
+              (user_id,))
+    bal_row = c.fetchone()
+    balance = bal_row[0] if bal_row else 0
+    conn.close()
+    return total, paid, balance
+
 async def send_invoice_for_plan(chat_id: int, user_id: int, plan: dict):
     payload = f"sub_{plan['stars']}_{plan['days']}_{user_id}_{int(time.time())}"
     save_invoice(payload, user_id, plan['stars'], plan['days'])
@@ -373,7 +546,6 @@ async def send_invoice_for_plan(chat_id: int, user_id: int, plan: dict):
         prices=[LabeledPrice(label=f"Premium {plan['label']}", amount=plan['stars'])],
     )
 
-# ─── Клавиатуры ───────────────────────────────────────────────────────
 def kb_subscription_plans():
     b = InlineKeyboardBuilder()
     for p in SUBSCRIPTION_PLANS:
@@ -392,13 +564,13 @@ def kb_check_channels(channels: list):
 
 def kb_admin_main():
     b = InlineKeyboardBuilder()
-    b.button(text="📊 Статистика",      callback_data="adm_stats")
-    b.button(text="🏆 Топ активности",  callback_data="adm_top")
-    b.button(text="🚫 Баны",            callback_data="adm_bans_list")
-    b.button(text="📢 Рассылка",        callback_data="adm_broadcast")
-    b.button(text="📋 Создать опрос",   callback_data="adm_poll_create")
+    b.button(text="📊 Статистика", callback_data="adm_stats")
+    b.button(text="🏆 Топ активности", callback_data="adm_top")
+    b.button(text="🚫 Баны", callback_data="adm_bans_list")
+    b.button(text="📢 Рассылка", callback_data="adm_broadcast")
+    b.button(text="📋 Создать опрос", callback_data="adm_poll_create")
     b.button(text="📣 Каналы подписки", callback_data="adm_channels")
-    b.button(text="🗑 Очистить work/",  callback_data="adm_cleanup")
+    b.button(text="🗑 Очистить work/", callback_data="adm_cleanup")
     b.adjust(2)
     return b.as_markup()
 
@@ -407,7 +579,6 @@ def kb_back_admin():
     b.button(text="⬅️ Назад", callback_data="adm_main")
     return b.as_markup()
 
-# ─── Тексты приветствий ───────────────────────────────────────────────
 def start_free_text():
     return (
         "👋 <b>Добро пожаловать в BR Assembly Bot!</b>\n\n"
@@ -437,7 +608,6 @@ def start_paid_text(expiry: str):
         "Все функции без ограничений. Команды — /help"
     )
 
-# ─── БД инициализация ─────────────────────────────────────────────────
 def initialize_database():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -540,7 +710,6 @@ def execute_sql_query(query, params=(), fetchone=False, fetchall=False):
     conn.commit()
     conn.close()
 
-# ─── Weapon ───────────────────────────────────────────────────────────
 def apply_weapon_params(folder: str, PT: int, RAZB: int):
     wj_path = os.path.join(folder, "weapon.json")
     if os.path.exists(wj_path):
@@ -578,7 +747,6 @@ def build_weapon_zip(tmp_folder: str, zip_path: str):
         for fname in os.listdir(tmp_folder):
             zf.write(os.path.join(tmp_folder, fname), fname)
 
-# ─── Логирование ──────────────────────────────────────────────────────
 async def send_log(message: types.Message, content_type: str = "текст", extra: str = ""):
     try:
         user = message.from_user
@@ -620,7 +788,6 @@ async def send_log(message: types.Message, content_type: str = "текст", ext
     except Exception as e:
         logging.warning(f"send_log error: {e}")
 
-# ─── Overlay ──────────────────────────────────────────────────────────
 def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
     base = Image.open(base_input).convert("RGBA")
     overlay = Image.open(overlay_input).convert("RGBA")
@@ -1602,11 +1769,6 @@ async def kvadratik(hex_color):
     image.save(image_path)
     return image_path
 
-# ══════════════════════════════════════════════════════════════════════
-# ─── ХЕНДЛЕРЫ ─────────────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════
-
-# ── Stars: платёж ─────────────────────────────────────────────────────
 @dp.pre_checkout_query()
 async def pre_checkout(query: types.PreCheckoutQuery):
     await query.answer(ok=True)
@@ -1628,17 +1790,64 @@ async def on_payment(message: types.Message):
         f"📅 Действует: {until_text}\n\n"
         "Все ограничения сняты. Приятного использования!", parse_mode="HTML")
 
-# ── Callback: купить план ─────────────────────────────────────────────
 @dp.callback_query(F.data.startswith("buy_"))
-async def cb_buy(callback: types.CallbackQuery):
+async def cb_buy(callback: types.CallbackQuery, state: FSMContext):
     stars = int(callback.data.split("_")[1])
     plan = next((p for p in SUBSCRIPTION_PLANS if p["stars"] == stars), None)
     if not plan:
-        await callback.answer("Тариф не найден", show_alert=True); return
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+    uid = callback.from_user.id
+    ref_disc = get_buyer_discount(uid)
+    if ref_disc > 0:
+        plan = {**plan,
+                "stars": max(1, int(plan["stars"] * (1 - ref_disc / 100))),
+                "label": plan["label"] + " -" + str(ref_disc) + "% (реферал)",
+                "emoji": "👥"}
+    await state.set_state(BuyFSM.waiting_promo)
+    await state.update_data(pending_plan=plan)
+    b = InlineKeyboardBuilder()
+    b.button(text="⏭ Пропустить", callback_data="buy_skip_promo")
+    await callback.answer()
+    await callback.message.answer(
+        "🎟 Есть промокод? Введи его или нажми пропустить.\n\n"
+        "Цена: <b>" + str(plan["stars"]) + "⭐ — " + plan["label"] + "</b>",
+        reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "buy_skip_promo")
+async def cb_buy_skip(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    plan = data.get("pending_plan")
+    if not plan:
+        await callback.answer("Сессия истекла", show_alert=True)
+        return
     await callback.answer()
     await send_invoice_for_plan(callback.from_user.id, callback.from_user.id, plan)
 
-# ── Callback: проверить каналы ────────────────────────────────────────
+@dp.message(BuyFSM.waiting_promo)
+async def fsm_buy_promo(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    plan = data.get("pending_plan")
+    await state.clear()
+    if not plan:
+        await message.answer("❌ Сессия истекла, начни заново.")
+        return
+    code = message.text.strip().upper()
+    ok_p, promo, err = use_promo(code, message.from_user.id)
+    if not ok_p:
+        await message.answer(err + "\n\nОплата без скидки:")
+        await send_invoice_for_plan(message.from_user.id, message.from_user.id, plan)
+        return
+    new_plan = apply_promo_to_plan(plan, promo)
+    savings = plan["stars"] - new_plan["stars"]
+    await message.answer(
+        "✅ <b>Промокод применён!</b>\n"
+        "Было: " + str(plan["stars"]) + "⭐ → Стало: <b>" + str(new_plan["stars"]) + "⭐</b>"
+        + (" (экономия " + str(savings) + "⭐)" if savings > 0 else ""),
+        parse_mode="HTML")
+    await send_invoice_for_plan(message.from_user.id, message.from_user.id, new_plan)
+
 @dp.callback_query(F.data == "recheck_channels")
 async def cb_recheck(callback: types.CallbackQuery):
     not_sub = await check_required_subs(callback.from_user.id)
@@ -1649,7 +1858,6 @@ async def cb_recheck(callback: types.CallbackQuery):
             "✅ <b>Подписка подтверждена!</b>\nТеперь вы можете пользоваться ботом. Команды — /help",
             parse_mode="HTML")
 
-# ── Admin callbacks ───────────────────────────────────────────────────
 @dp.callback_query(F.data == "adm_main")
 async def cb_adm_main(callback: types.CallbackQuery):
     conn = sqlite3.connect(DB_PATH)
@@ -1834,19 +2042,208 @@ async def fsm_poll_opts(message: types.Message, state: FSMContext):
         await asyncio.sleep(0.05)
     await message.answer(f"✅ Опрос отправлен {sent} пользователям.")
 
-# ── Document handler ───────────────────────────────────────────────────
+@dp.callback_query(F.data.startswith("promo_apply_"))
+async def cb_promo_apply(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    stars = int(parts[2])
+    code = "_".join(parts[3:])
+    uid = callback.from_user.id
+    p = get_promo(code)
+    if not p:
+        await callback.answer("❌ Промокод недействителен", show_alert=True)
+        return
+    plan = next((pl for pl in SUBSCRIPTION_PLANS if pl["stars"] == stars), None)
+    if not plan:
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+    new_plan = apply_promo_to_plan(plan, p)
+    await callback.answer()
+    await send_invoice_for_plan(uid, uid, new_plan)
+
+@dp.callback_query(F.data == "adm_promos")
+async def cb_adm_promos(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == "True"):
+        await callback.answer("❌", show_alert=True)
+        return
+    promos = list_promos()
+    if not promos:
+        txt = "🎟 <b>Промокодов пока нет</b>"
+    else:
+        lines = ["🎟 <b>Промокоды:</b>\n"]
+        for code, name, disc, cstars, cdays, uses, max_uses, exp, active in promos:
+            status = "✅" if active else "❌"
+            limit = str(uses) + "/" + (str(max_uses) if max_uses else "∞")
+            if cstars:
+                price_info = str(cstars) + "⭐ " + str(cdays) + "д"
+            elif disc:
+                price_info = "-" + str(disc) + "%"
+            else:
+                price_info = "—"
+            exp_str = exp[:10] if exp else "∞"
+            lines.append(status + " <code>" + code + "</code> — " + (name or "—") +
+                         " | " + price_info + " | " + limit + " | до " + exp_str)
+        txt = "\n".join(lines)
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Создать промокод", callback_data="adm_promo_create")
+    b.button(text="❌ Деактивировать", callback_data="adm_promo_deact")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(1)
+    await callback.message.edit_text(txt, reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_promo_create")
+async def cb_adm_promo_create(callback: types.CallbackQuery, state: FSMContext):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == "True"):
+        await callback.answer("❌", show_alert=True)
+        return
+    await state.set_state(AdminFSM.promo_create)
+    lines_ex = [
+        "КОД",
+        "Название",
+        "Комментарий (или -)",
+        "Ссылка (или -)",
+        "Скидка % (0 = нет)",
+        "Кастом цена Stars (0 = нет)",
+        "Кастом дней (0 = стандарт)",
+        "Макс. использований (0 = ∞)",
+        "Дата истечения ДД.ММ.ГГГГ (или -)",
+    ]
+    example_lines = [
+        "SUMMER25",
+        "Летняя акция",
+        "Скидка для новых",
+        "https://t.me/pweper",
+        "25",
+        "0",
+        "0",
+        "100",
+        "31.08.2025",
+    ]
+    instr = ("🎟 <b>Создание промокода</b>\n\n"
+             "Отправь 9 строк:\n<code>" +
+             "\n".join(lines_ex) + "</code>\n\n"
+             "<b>Пример:</b>\n<code>" +
+             "\n".join(example_lines) + "</code>")
+    await callback.message.answer(instr, parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(AdminFSM.promo_create)
+async def fsm_promo_create(message: types.Message, state: FSMContext):
+    await state.clear()
+    lines = [l.strip() for l in message.text.strip().split("\n")]
+    if len(lines) < 9:
+        await message.answer("❌ Нужно 9 строк. Отмена.")
+        return
+    code = lines[0]
+    name = lines[1]
+    comment = None if lines[2] == "-" else lines[2]
+    link    = None if lines[3] == "-" else lines[3]
+    try:
+        disc   = int(lines[4])
+        cstars = int(lines[5])
+        cdays  = int(lines[6])
+        max_u  = int(lines[7])
+    except ValueError:
+        await message.answer("❌ Строки 5–8 должны быть числами.")
+        return
+    exp = None
+    if lines[8] != "-":
+        try:
+            exp = datetime.datetime.strptime(lines[8], "%d.%m.%Y").isoformat()
+        except:
+            await message.answer("❌ Дата: ДД.ММ.ГГГГ")
+            return
+    ok_c, err = create_promo(code, name, comment, link, disc, cstars, cdays,
+                             max_u, exp, message.from_user.id)
+    if ok_c:
+        info = []
+        if cstars:
+            info.append("💰 Цена: " + str(cstars) + "⭐ / " +
+                        (str(cdays) if cdays else "стандарт") + " дн.")
+        elif disc:
+            info.append("💸 Скидка: -" + str(disc) + "%")
+        if max_u:
+            info.append("🔢 Лимит: " + str(max_u))
+        if exp:
+            info.append("📅 До: " + lines[8])
+        await message.answer(
+            "✅ <b>Промокод создан!</b>\n🎟 <code>" + code.upper() + "</code> — " + name +
+            ("\n" + "\n".join(info) if info else ""),
+            parse_mode="HTML")
+    else:
+        await message.answer("❌ " + str(err))
+
+@dp.callback_query(F.data == "adm_promo_deact")
+async def cb_adm_promo_deact(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="deact")
+    await callback.message.answer("Введите код промокода для деактивации:")
+    await callback.answer()
+
+@dp.message(AdminFSM.promo_code_input)
+async def fsm_promo_code_input(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    code = message.text.strip().upper()
+    if data.get("promo_action") == "deact":
+        if deactivate_promo(code):
+            await message.answer("✅ Промокод <code>" + code + "</code> деактивирован.",
+                                 parse_mode="HTML")
+        else:
+            await message.answer("❌ Промокод <code>" + code + "</code> не найден.",
+                                 parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_ref_stats")
+async def cb_adm_ref_stats(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == "True"):
+        await callback.answer("❌", show_alert=True)
+        return
+    conn2 = sqlite3.connect(DB_PATH)
+    c2 = conn2.cursor()
+    c2.execute("SELECT COUNT(*) FROM referrals")
+    total = c2.fetchone()[0]
+    c2.execute("SELECT COUNT(*) FROM referrals WHERE paid=1")
+    paid = c2.fetchone()[0]
+    c2.execute("""SELECT u.username, u.chat_id, COUNT(r.id) as cnt
+                  FROM referrals r JOIN users u ON r.referrer_id=u.chat_id
+                  WHERE r.paid=1 GROUP BY r.referrer_id ORDER BY cnt DESC LIMIT 10""")
+    top = c2.fetchall(); conn2.close()
+    lines = [
+        "👥 <b>Рефералы</b>\n",
+        "Всего: <b>" + str(total) + "</b> | Оплатили: <b>" + str(paid) + "</b>\n",
+        "🏆 <b>Топ рефереров:</b>"
+    ]
+    for uname, uid, cnt in top:
+        name = ("@" + uname) if uname else ("ID:" + str(uid))
+        lines.append("• " + name + " — " + str(cnt) + " реф.")
+    await callback.message.edit_text("\n".join(lines), reply_markup=kb_back_admin(),
+                                     parse_mode="HTML")
+
 @dp.message(F.document)
 async def handle_document_processing(message: types.Message, state: FSMContext):
+    try:
+        await _doc_inner(message, state)
+    except Exception as e:
+        logging.exception(f"doc unhandled: {e}")
+        try:
+            await message.answer("❌ Внутренняя ошибка при обработке файла.")
+        except: pass
+
+async def _doc_inner(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or f"user_{user_id}"
 
-    # Антиспам
-    allowed, blocked_until = check_antispam(user_id)
-    if not allowed:
-        secs = max(0, int(blocked_until - time.time()))
-        await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
-
-    # Бан
     banned_flag, ban_reason = is_banned(user_id)
     if banned_flag:
         await message.answer(f"🚫 Вы заблокированы. Причина: {ban_reason or '—'}"); return
@@ -1864,7 +2261,11 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
 
     is_subscribed, expiry_date_value = await get_user_status_async(user_id)
 
-    # Для free: проверка подписки на каналы
+    allowed, blocked_until = check_antispam(user_id, is_paid=is_subscribed)
+    if not allowed:
+        secs = max(0, int(blocked_until - time.time()))
+        await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
+
     if not is_subscribed:
         not_sub = await check_required_subs(user_id)
         if not_sub:
@@ -1873,7 +2274,6 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
                 "\n".join(f"• {ch}" for ch in not_sub) + "\n\nПосле подписки нажмите <b>✅ Проверить</b>",
                 reply_markup=kb_check_channels(not_sub), parse_mode="HTML"); return
 
-    # Для free: ограничение размера файла
     if not is_subscribed:
         file_size_mb = (message.document.file_size or 0) / (1024 * 1024)
         if file_size_mb > FREE_MAX_FILE_MB:
@@ -1885,7 +2285,6 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
 
     inc_msg_count(user_id)
 
-    # Очередь
     queue_msg = None
     if is_subscribed:
         await queue_acquire(True)
@@ -2341,7 +2740,6 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
             return
 
         else:
-            # Автоматическая обработка по типу файла (без подписи)
             if file_format == "ifp":
                 src_dir = Path(f'work/work_ANI/{r}')
                 os.makedirs(src_dir, exist_ok=True)
@@ -2515,7 +2913,6 @@ async def handle_document_processing(message: types.Message, state: FSMContext):
     finally:
         await queue_release(is_subscribed)
 
-# ── Медиа-хендлеры ────────────────────────────────────────────────────
 @dp.message(F.photo)
 async def handle_photo(message: types.Message): await send_log(message, "фото")
 
@@ -2549,34 +2946,44 @@ async def handle_poll(message: types.Message): await send_log(message, "опро
 @dp.message(F.story)
 async def handle_story(message: types.Message): await send_log(message, "история")
 
-# ── Текстовые команды ─────────────────────────────────────────────────
 @dp.message(F.text)
 async def ok(message: types.Message):
+    try:
+        await _ok_inner(message)
+    except Exception as e:
+        logging.exception(f"ok unhandled: {e}")
+        try:
+            await message.answer("❌ Внутренняя ошибка. Попробуйте ещё раз.")
+        except: pass
+
+async def _ok_inner(message: types.Message):
     user_id = message.from_user.id
     username = message.from_user.username or f"user_{user_id}"
 
-    # Антиспам
-    allowed, blocked_until = check_antispam(user_id)
-    if not allowed:
-        secs = max(0, int(blocked_until - time.time()))
-        await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
-
-    # Бан
     banned_flag, ban_reason = is_banned(user_id)
     if banned_flag:
         await message.answer(f"🚫 Вы заблокированы. Причина: {ban_reason or '—'}"); return
 
-    await send_log(message, "текст")
     sub, message_to_send = await update(user_id, username)
     if sub:
         await message.answer(message_to_send); return
 
     is_subscribed, expiry_date_value = await get_user_status_async(user_id)
+
+    allowed, blocked_until = check_antispam(user_id, is_paid=is_subscribed)
+    if not allowed:
+        secs = max(0, int(blocked_until - time.time()))
+        await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
+
+    try:
+        await send_log(message, "текст")
+    except Exception as e:
+        logging.warning(f"send_log: {e}")
+
     inc_msg_count(user_id)
 
     j = message.text.split()
 
-    # /start
     if "/start" in message.text:
         if is_subscribed:
             b = InlineKeyboardBuilder()
@@ -2586,7 +2993,6 @@ async def ok(message: types.Message):
             await message.answer(start_free_text(), reply_markup=kb_subscription_plans(), parse_mode='HTML')
         return
 
-    # /mysub
     if "/mysub" in message.text:
         if is_subscribed:
             forever = expiry_date_value == "31.12.2099"
@@ -2596,7 +3002,6 @@ async def ok(message: types.Message):
             await message.answer("❌ <b>У вас нет Premium-подписки</b>\n\nКупить: /start", reply_markup=kb_subscription_plans(), parse_mode="HTML")
         return
 
-    # /top
     if "/top" in message.text:
         rows = get_top_users(10)
         medals = ["🥇","🥈","🥉"]+["🔸"]*7
@@ -2606,7 +3011,6 @@ async def ok(message: types.Message):
             lines.append(f"{medals[i]} {i+1}. {name} — <b>{cnt}</b> действий")
         await message.answer("\n".join(lines), parse_mode="HTML"); return
 
-    # /admin
     if "/admin" in message.text:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -2624,7 +3028,6 @@ async def ok(message: types.Message):
                 f"💾 Work-папка: <b>{get_work_size_gb():.2f} ГБ</b>")
         await message.answer(text, reply_markup=kb_admin_main(), parse_mode="HTML"); return
 
-    # /addchannel
     if message.text.startswith("/addchannel"):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -2639,7 +3042,6 @@ async def ok(message: types.Message):
         add_channel(ch)
         await message.answer(f"✅ Канал {ch} добавлен в обязательные."); return
 
-    # /delchannel
     if message.text.startswith("/delchannel"):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -2654,7 +3056,6 @@ async def ok(message: types.Message):
         ok_del = remove_channel(ch)
         await message.answer(f"{'✅ Удалён' if ok_del else '❌ Не найден'}: {ch}"); return
 
-    # /ban
     if message.text.startswith("/ban "):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -2671,7 +3072,6 @@ async def ok(message: types.Message):
         except (ValueError, IndexError): await message.answer("❌ Неверный ID")
         return
 
-    # /unban
     if message.text.startswith("/unban "):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -2687,7 +3087,6 @@ async def ok(message: types.Message):
         except (ValueError, IndexError): await message.answer("❌ Неверный ID")
         return
 
-    # /givesub
     if message.text.startswith("/givesub"):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -2705,7 +3104,6 @@ async def ok(message: types.Message):
         except ValueError: await message.answer("❌ Неверные параметры")
         return
 
-    # Для free-пользователей: проверка подписки на каналы
     if not is_subscribed:
         info_cmds = ["/top", "/help", "/start", "/mysub", "/admin"]
         if not any(cmd in message.text for cmd in info_cmds):
@@ -2716,7 +3114,6 @@ async def ok(message: types.Message):
                     "\n\nПосле подписки нажмите <b>✅ Проверить</b>",
                     reply_markup=kb_check_channels(not_sub), parse_mode="HTML"); return
 
-    # Очередь для обрабатывающих команд
     PROCESSING_CMDS = ['/hud', '/hp', '/blood', '/tree', '/vctree', '/kp', '/carmenu',
                        '/speedometer', '/road', '/casino', '/pickup', '/timecyc', '/colorcyc',
                        '/particle', '/genrl', '/merger', '/aitimecyc', '/weapon']
@@ -3100,6 +3497,63 @@ async def ok(message: types.Message):
             image_path = await kvadratik(hex_color)
             await t_client.send_file(user_id, image_path, caption=f'🎨<b>Hex цвет - {hex_color}</b>', parse_mode="HTML")
             os.remove(image_path)
+
+        elif "/promo" in message.text:
+            parts_p = message.text.split()
+            if len(parts_p) < 2:
+                await message.answer(
+                    "🎟 <b>Активация промокода</b>\n\nФормат: <code>/promo КОД</code>",
+                    parse_mode="HTML")
+            else:
+                code_p = parts_p[1].upper()
+                ok_p, promo_p, err_p = use_promo(code_p, user_id)
+                if not ok_p:
+                    await message.answer(err_p, parse_mode="HTML")
+                else:
+                    b_p = InlineKeyboardBuilder()
+                    for pl in SUBSCRIPTION_PLANS:
+                        np = apply_promo_to_plan(pl, promo_p)
+                        b_p.button(text=np["emoji"] + " " + np["label"] + " — " + str(np["stars"]) + "⭐",
+                                   callback_data="promo_apply_" + str(pl["stars"]) + "_" + code_p)
+                    b_p.adjust(1)
+                    info_lines = ["✅ <b>Промокод " + code_p + " активирован!</b>"]
+                    if promo_p["name"]:    info_lines.append("📝 " + promo_p["name"])
+                    if promo_p["comment"]: info_lines.append("💬 " + promo_p["comment"])
+                    if promo_p["link"]:    info_lines.append("🔗 " + promo_p["link"])
+                    if promo_p["custom_stars"]:
+                        info_lines.append("💰 Спеццена: " + str(promo_p["custom_stars"]) + "⭐")
+                    elif promo_p["discount_pct"]:
+                        info_lines.append("💸 Скидка: -" + str(promo_p["discount_pct"]) + "%")
+                    info_lines.append("\nВыберите тариф:")
+                    await message.answer("\n".join(info_lines), reply_markup=b_p.as_markup(),
+                                         parse_mode="HTML")
+
+        elif "/refbal" in message.text:
+            _, _, bal = get_ref_stats(user_id)
+            await message.answer(
+                "💰 <b>Реферальный баланс: " + str(bal) + " ⭐</b>\n\n"
+                "Для вывода напишите @keedboy016", parse_mode="HTML")
+
+        elif "/ref" in message.text:
+            ref_link_u = get_ref_link(user_id)
+            tot_r, paid_r, bal_r = get_ref_stats(user_id)
+            next_tier = next(((t, d) for t, d in sorted(
+                [(1,10),(10,15),(20,20),(50,25)], key=lambda x: x[0]
+            ) if t > paid_r), None)
+            tier_txt = ("\n📈 До след. уровня: ещё " + str(next_tier[0]-paid_r) +
+                        " рефералов (" + str(next_tier[1]) + "%)") if next_tier else "\n🏆 Максимум!"
+            await message.answer(
+                "👥 <b>Реферальная программа</b>\n\n"
+                "🔗 Ваша ссылка:\n<code>" + ref_link_u + "</code>\n\n"
+                "📊 Статистика:\n"
+                "  Приглашено: <b>" + str(tot_r) + "</b>\n"
+                "  Оплатили: <b>" + str(paid_r) + "</b>\n"
+                "  Баланс: <b>" + str(bal_r) + "⭐</b>" +
+                tier_txt + "\n\n"
+                "💎 <b>Скидки для приглашённых:</b>\n"
+                "  1+ → -10% | 10+ → -15% | 20+ → -20% | 50+ → -25%\n\n"
+                "Вы получаете <b>15%</b> от покупки реферала ⭐",
+                parse_mode="HTML")
 
         elif "/help" in message.text:
             await message.answer("""<b>Привет👋 Вот возможности бота:</b>
