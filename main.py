@@ -55,7 +55,7 @@ length = 4
 DB_PATH = 'users.db'
 
 FREE_MAX_FILE_MB = 20
-FREE_DELAY_SEC = 10
+FREE_DELAY_SEC = 2
 MAX_WORK_SIZE_GB = 1.5
 ANTISPAM_WINDOW = 10
 ANTISPAM_LIMIT = 6
@@ -181,7 +181,7 @@ async def queue_acquire(is_paid: bool):
         if _active_paid > 0:
             await asyncio.sleep(FREE_DELAY_SEC)
         else:
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
         await _free_semaphore.acquire()
 
 async def queue_release(is_paid: bool):
@@ -444,6 +444,7 @@ def apply_promo_to_plan(plan, promo):
 
 REFERRAL_BONUS_TIERS = [(50, 25), (20, 20), (10, 15), (1, 10)]
 REFERRAL_REWARD_PCT = 15
+L2_REWARD_TIERS = [(50, 4), (20, 3), (10, 2), (0, 1)]
 
 def get_ref_link(user_id):
     import base64
@@ -497,23 +498,46 @@ def get_buyer_discount(referred_id):
             return disc
     return 10
 
+def get_l2_reward_pct(referrer_id):
+    paid = count_paid_referrals(referrer_id)
+    for min_r, pct in L2_REWARD_TIERS:
+        if paid >= min_r:
+            return pct
+    return 1
+
 def mark_referral_paid(referred_id, stars_paid):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT referrer_id FROM referrals WHERE referred_id=? AND paid=0", (referred_id,))
     row = c.fetchone()
-    if row:
-        referrer_id = row[0]
-        reward = max(1, int(stars_paid * REFERRAL_REWARD_PCT / 100))
-        c.execute("UPDATE referrals SET paid=1, reward_given=? WHERE referred_id=?",
-                  (reward, referred_id))
-        c.execute("""UPDATE users SET
-            ref_balance=CAST(COALESCE(CAST(ref_balance AS INTEGER),0)+? AS TEXT)
-            WHERE chat_id=?""", (reward, referrer_id))
-        conn.commit(); conn.close()
-        return referrer_id, reward
+    if not row:
+        conn.close()
+        return None, 0
+    referrer_id = row[0]
+    reward = max(1, int(stars_paid * REFERRAL_REWARD_PCT / 100))
+    c.execute("UPDATE referrals SET paid=1, reward_given=? WHERE referred_id=?",
+              (reward, referred_id))
+    c.execute("""UPDATE users SET
+        ref_balance=CAST(COALESCE(CAST(ref_balance AS INTEGER),0)+? AS TEXT)
+        WHERE chat_id=?""", (reward, referrer_id))
+    c.execute("SELECT referred_by FROM users WHERE chat_id=?", (referrer_id,))
+    l2_row = c.fetchone()
+    l2_referrer = None
+    l2_reward = 0
+    if l2_row and l2_row[0]:
+        try:
+            l2_id = int(l2_row[0])
+            l2_pct = get_l2_reward_pct(l2_id)
+            l2_reward = max(1, int(stars_paid * l2_pct / 100))
+            c.execute("""UPDATE users SET
+                ref_balance=CAST(COALESCE(CAST(ref_balance AS INTEGER),0)+? AS TEXT)
+                WHERE chat_id=?""", (l2_reward, l2_id))
+            l2_referrer = l2_id
+        except:
+            pass
+    conn.commit()
     conn.close()
-    return None, 0
+    return referrer_id, reward, l2_referrer, l2_reward
 
 def get_ref_stats(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -581,7 +605,7 @@ def kb_back_admin():
 
 def start_free_text():
     return (
-        "👋 <b>Добро пожаловать в Pweper Bot!</b>\n\n"
+        "👋 <b>Добро пожаловать в BR Assembly Bot!</b>\n\n"
         "⚠️ <b>Вы используете бесплатную версию</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "❌ <b>Ограничения без подписки:</b>\n"
@@ -2069,30 +2093,49 @@ async def cb_adm_promos(callback: types.CallbackQuery):
     if not (row and row[0] == "True"):
         await callback.answer("❌", show_alert=True)
         return
-    promos = list_promos()
-    if not promos:
-        txt = "🎟 <b>Промокодов пока нет</b>"
-    else:
-        lines = ["🎟 <b>Промокоды:</b>\n"]
+    conn2 = sqlite3.connect(DB_PATH)
+    c2 = conn2.cursor()
+    c2.execute("SELECT COUNT(*) FROM promo_codes")
+    total_promos = c2.fetchone()[0]
+    c2.execute("SELECT COUNT(*) FROM promo_codes WHERE is_active=1")
+    active_promos = c2.fetchone()[0]
+    c2.execute("SELECT SUM(uses) FROM promo_codes")
+    total_uses = c2.fetchone()[0] or 0
+    c2.execute("SELECT code, name, discount_pct, custom_stars, custom_days, uses, max_uses, expires_at, is_active FROM promo_codes ORDER BY uses DESC")
+    promos = c2.fetchall()
+    conn2.close()
+    lines = [
+        "🎟 <b>Управление промокодами</b>\n",
+        "Всего: <b>" + str(total_promos) + "</b> | Активных: <b>" + str(active_promos) + "</b> | Всего активаций: <b>" + str(total_uses) + "</b>\n",
+    ]
+    if promos:
+        lines.append("─────────────────────")
         for code, name, disc, cstars, cdays, uses, max_uses, exp, active in promos:
             status = "✅" if active else "❌"
             limit = str(uses) + "/" + (str(max_uses) if max_uses else "∞")
             if cstars:
-                price_info = str(cstars) + "⭐ " + str(cdays) + "д"
+                price_info = str(cstars) + "⭐/" + str(cdays) + "д"
             elif disc:
                 price_info = "-" + str(disc) + "%"
             else:
                 price_info = "—"
             exp_str = exp[:10] if exp else "∞"
-            lines.append(status + " <code>" + code + "</code> — " + (name or "—") +
-                         " | " + price_info + " | " + limit + " | до " + exp_str)
-        txt = "\n".join(lines)
+            lines.append(status + " <code>" + code + "</code> <i>" + (name or "") + "</i>")
+            lines.append("   " + price_info + " | использ: " + limit + " | до " + exp_str)
     b = InlineKeyboardBuilder()
-    b.button(text="➕ Создать промокод", callback_data="adm_promo_create")
+    b.button(text="➕ Создать", callback_data="adm_promo_create")
     b.button(text="❌ Деактивировать", callback_data="adm_promo_deact")
+    b.button(text="🔍 Детали кода", callback_data="adm_promo_detail")
     b.button(text="⬅️ Назад", callback_data="adm_main")
-    b.adjust(1)
-    await callback.message.edit_text(txt, reply_markup=b.as_markup(), parse_mode="HTML")
+    b.adjust(2)
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_promo_detail")
+async def cb_adm_promo_detail(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="detail")
+    await callback.message.answer("Введите код промокода для просмотра деталей:")
+    await callback.answer()
 
 @dp.callback_query(F.data == "adm_promo_create")
 async def cb_adm_promo_create(callback: types.CallbackQuery, state: FSMContext):
@@ -2187,18 +2230,102 @@ async def cb_adm_promo_deact(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите код промокода для деактивации:")
     await callback.answer()
 
+@dp.callback_query(F.data == "adm_ref_user")
+async def cb_adm_ref_user(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.promo_code_input)
+    await state.update_data(promo_action="ref_user")
+    await callback.message.answer("Введите ID или @username пользователя:")
+    await callback.answer()
+
+
 @dp.message(AdminFSM.promo_code_input)
 async def fsm_promo_code_input(message: types.Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
     code = message.text.strip().upper()
-    if data.get("promo_action") == "deact":
+    action = data.get("promo_action", "")
+    if action == "deact":
         if deactivate_promo(code):
-            await message.answer("✅ Промокод <code>" + code + "</code> деактивирован.",
-                                 parse_mode="HTML")
+            await message.answer("✅ Промокод <code>" + code + "</code> деактивирован.", parse_mode="HTML")
         else:
-            await message.answer("❌ Промокод <code>" + code + "</code> не найден.",
-                                 parse_mode="HTML")
+            await message.answer("❌ Промокод <code>" + code + "</code> не найден.", parse_mode="HTML")
+    elif action == "detail":
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM promo_codes WHERE code=?", (code,))
+        row = c.fetchone()
+        c.execute("SELECT u.username, u.chat_id, pu.used_at FROM promo_uses pu LEFT JOIN users u ON pu.user_id=u.chat_id WHERE pu.code=? ORDER BY pu.used_at DESC LIMIT 15", (code,))
+        uses_list = c.fetchall()
+        conn.close()
+        if not row:
+            await message.answer("❌ Промокод не найден.")
+            return
+        keys = ["id","code","name","comment","link","discount_pct","custom_stars","custom_days","max_uses","uses","expires_at","is_active","created_by","created_at"]
+        p = dict(zip(keys, row))
+        lines = [
+            "🎟 <b>Промокод: <code>" + p["code"] + "</code></b>",
+            "Статус: " + ("✅ Активен" if p["is_active"] else "❌ Деактивирован"),
+            "Название: " + (p["name"] or "—"),
+            "Комментарий: " + (p["comment"] or "—"),
+            "Ссылка: " + (p["link"] or "—"),
+        ]
+        if p["custom_stars"]:
+            lines.append("Цена: " + str(p["custom_stars"]) + "⭐ / " + str(p["custom_days"]) + " дн.")
+        elif p["discount_pct"]:
+            lines.append("Скидка: -" + str(p["discount_pct"]) + "%")
+        lines.append("Использований: <b>" + str(p["uses"]) + "</b>" + ("/" + str(p["max_uses"]) if p["max_uses"] else "/∞"))
+        lines.append("Истекает: " + (p["expires_at"][:10] if p["expires_at"] else "∞"))
+        lines.append("Создан: " + (p["created_at"][:10] if p["created_at"] else "—"))
+        if uses_list:
+            lines.append("\n👤 <b>Последние активации:</b>")
+            for uname, uid, used_at in uses_list:
+                name = ("@" + uname) if uname else ("ID:" + str(uid))
+                lines.append("• " + name + " — " + (used_at[:16] if used_at else "—"))
+        await message.answer("\n".join(lines), parse_mode="HTML")
+    elif action == "ref_user":
+        query = code
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        if query.startswith("@"):
+            c.execute("SELECT chat_id FROM users WHERE username=?", (query[1:],))
+        else:
+            try:
+                c.execute("SELECT chat_id FROM users WHERE chat_id=?", (int(query),))
+            except:
+                conn.close()
+                await message.answer("❌ Неверный ID")
+                return
+        uid_row = c.fetchone()
+        if not uid_row:
+            conn.close()
+            await message.answer("❌ Пользователь не найден")
+            return
+        uid = uid_row[0]
+        c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (uid,))
+        tot = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND paid=1", (uid,))
+        paid_r = c.fetchone()[0]
+        c.execute("SELECT COALESCE(CAST(ref_balance AS INTEGER),0) FROM users WHERE chat_id=?", (uid,))
+        bal = c.fetchone()[0]
+        c.execute("SELECT referred_by FROM users WHERE chat_id=?", (uid,))
+        ref_by = c.fetchone()
+        c.execute("""SELECT u2.username, u2.chat_id, r.paid, r.reward_given, r.created_at
+                     FROM referrals r LEFT JOIN users u2 ON r.referred_id=u2.chat_id
+                     WHERE r.referrer_id=? ORDER BY r.created_at DESC LIMIT 20""", (uid,))
+        refs = c.fetchall()
+        conn.close()
+        lines_u = [
+            "👤 <b>Рефералы пользователя ID:" + str(uid) + "</b>\n",
+            "Приглашено: <b>" + str(tot) + "</b> | Оплатили: <b>" + str(paid_r) + "</b>",
+            "Баланс: <b>" + str(bal) + "⭐</b>",
+            "Сам приглашён: " + (("ID:" + str(ref_by[0])) if ref_by and ref_by[0] else "нет") + "\n",
+            "📋 <b>Список рефералов:</b>"
+        ]
+        for uname2, uid2, is_paid, rew, created in refs:
+            nm = ("@" + uname2) if uname2 else ("ID:" + str(uid2))
+            status2 = "✅" if is_paid else "⏳"
+            lines_u.append(status2 + " " + nm + " +" + str(rew or 0) + "⭐ | " + (created[:10] if created else "—"))
+        await message.answer("\n".join(lines_u), parse_mode="HTML")
 
 @dp.callback_query(F.data == "adm_ref_stats")
 async def cb_adm_ref_stats(callback: types.CallbackQuery):
@@ -2214,20 +2341,40 @@ async def cb_adm_ref_stats(callback: types.CallbackQuery):
     c2.execute("SELECT COUNT(*) FROM referrals")
     total = c2.fetchone()[0]
     c2.execute("SELECT COUNT(*) FROM referrals WHERE paid=1")
-    paid = c2.fetchone()[0]
-    c2.execute("""SELECT u.username, u.chat_id, COUNT(r.id) as cnt
+    paid_count = c2.fetchone()[0]
+    c2.execute("SELECT COUNT(*) FROM referrals WHERE paid=0")
+    pending = c2.fetchone()[0]
+    c2.execute("SELECT SUM(reward_given) FROM referrals")
+    total_rewards = c2.fetchone()[0] or 0
+    c2.execute("""SELECT u.username, u.chat_id,
+                  COUNT(r.id) as total_r,
+                  SUM(CASE WHEN r.paid=1 THEN 1 ELSE 0 END) as paid_r,
+                  COALESCE(CAST(u.ref_balance AS INTEGER),0) as bal
                   FROM referrals r JOIN users u ON r.referrer_id=u.chat_id
-                  WHERE r.paid=1 GROUP BY r.referrer_id ORDER BY cnt DESC LIMIT 10""")
-    top = c2.fetchall(); conn2.close()
+                  GROUP BY r.referrer_id ORDER BY paid_r DESC LIMIT 10""")
+    top = c2.fetchall()
+    c2.execute("SELECT COUNT(DISTINCT referrer_id) FROM referrals")
+    active_refs = c2.fetchone()[0]
+    conn2.close()
+    conv_rate = round(paid_count / total * 100, 1) if total > 0 else 0
     lines = [
-        "👥 <b>Рефералы</b>\n",
-        "Всего: <b>" + str(total) + "</b> | Оплатили: <b>" + str(paid) + "</b>\n",
+        "👥 <b>Статистика рефералов</b>\n",
+        "Всего переходов: <b>" + str(total) + "</b>",
+        "Оплатили: <b>" + str(paid_count) + "</b> (" + str(conv_rate) + "%)",
+        "Ожидают оплаты: <b>" + str(pending) + "</b>",
+        "Активных рефереров: <b>" + str(active_refs) + "</b>",
+        "Выплачено бонусов: <b>" + str(total_rewards) + "⭐</b>\n",
         "🏆 <b>Топ рефереров:</b>"
     ]
-    for uname, uid, cnt in top:
+    medals = ["🥇","🥈","🥉"] + ["🔸"]*7
+    for i, (uname, uid, tot_r, paid_r, bal) in enumerate(top):
         name = ("@" + uname) if uname else ("ID:" + str(uid))
-        lines.append("• " + name + " — " + str(cnt) + " реф.")
-    await callback.message.edit_text("\n".join(lines), reply_markup=kb_back_admin(),
+        lines.append(medals[i] + " " + name + " — " + str(paid_r) + "/" + str(tot_r) + " реф. | баланс: " + str(bal) + "⭐")
+    b = InlineKeyboardBuilder()
+    b.button(text="📋 Рефералы пользователя", callback_data="adm_ref_user")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(1)
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(),
                                      parse_mode="HTML")
 
 @dp.message(F.document)
