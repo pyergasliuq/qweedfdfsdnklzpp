@@ -4,11 +4,12 @@ import logging
 import sqlite3
 import os
 import datetime
+import time
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import string
 import random
 from PIL import ImageColor, Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter, ImageOps, ImageChops
-from aiogram.types import FSInputFile, BufferedInputFile
+from aiogram.types import FSInputFile, BufferedInputFile, LabeledPrice
 import zipfile
 from pathlib import Path
 import numpy as np
@@ -50,9 +51,27 @@ t_client = TelegramClient("tele_upload_session", API_ID, API_HASH)
 logging.basicConfig(level=logging.INFO)
 loging_id = [2080411409]
 boti = Bot(token=os.getenv("token2"))
-NOT_HI_MESSAGE = "Здравствуйте! Чтобы использовать бота, вам необходимо оформить подписку(платную) @keedboy016"
 length = 4
 DB_PATH = 'users.db'
+
+# ─── Freemium константы ───────────────────────────────────────────────
+FREE_MAX_FILE_MB = 20
+FREE_DELAY_SEC = 10
+MAX_WORK_SIZE_GB = 1.5
+ANTISPAM_WINDOW = 10
+ANTISPAM_LIMIT = 6
+ANTISPAM_BLOCK_SEC = 45
+DEFAULT_CHANNELS = ['@pweper', '@nonerai', '@noberai_team']
+
+SUBSCRIPTION_PLANS = [
+    {"stars": 50,   "days": 14,   "label": "2 недели",  "emoji": "⚡"},
+    {"stars": 80,   "days": 30,   "label": "1 месяц",   "emoji": "🔥"},
+    {"stars": 200,  "days": 90,   "label": "3 месяца",  "emoji": "💎"},
+    {"stars": 350,  "days": 180,  "label": "6 месяцев", "emoji": "👑"},
+    {"stars": 600,  "days": 365,  "label": "1 год",     "emoji": "🏆"},
+    {"stars": 1000, "days": -1,   "label": "Навсегда",  "emoji": "♾️"},
+]
+
 FILE_SUFFIXES = ['logobrkrasnodar', 'logobrkaliningrad', 'logobrbelgorod', 'logobrizhevsk', 'logobrgray',
                  'logobryakutsk', 'logobrvoronezh', 'logobrcherry', 'logobrcrimson', 'logobrkrasnoyarsk',
                  'logobrnorilsk', 'logobrorel', 'logobrbratsk', 'logobrlipetsk', 'logobrtolyatti', 'logobrcherepovets',
@@ -127,6 +146,401 @@ PRESETS = {
 }
 weapon_user_settings: dict[int, str] = {}
 
+# ─── FSM States ───────────────────────────────────────────────────────
+class OverlayStates(StatesGroup):
+    waiting_for_second_image = State()
+
+class AdminFSM(StatesGroup):
+    broadcast_text  = State()
+    poll_question   = State()
+    poll_options    = State()
+    unban_id        = State()
+
+# ─── Очередь ──────────────────────────────────────────────────────────
+_active_paid = 0
+_active_paid_lock = asyncio.Lock()
+_free_semaphore = None
+_paid_semaphore = None
+
+def init_semaphores():
+    global _free_semaphore, _paid_semaphore
+    _free_semaphore = asyncio.Semaphore(2)
+    _paid_semaphore = asyncio.Semaphore(8)
+
+async def queue_acquire(is_paid: bool):
+    global _active_paid
+    if is_paid:
+        async with _active_paid_lock:
+            _active_paid += 1
+        await _paid_semaphore.acquire()
+    else:
+        if _active_paid > 0:
+            await asyncio.sleep(FREE_DELAY_SEC)
+        else:
+            await asyncio.sleep(3)
+        await _free_semaphore.acquire()
+
+async def queue_release(is_paid: bool):
+    global _active_paid
+    if is_paid:
+        async with _active_paid_lock:
+            _active_paid = max(0, _active_paid - 1)
+        _paid_semaphore.release()
+    else:
+        _free_semaphore.release()
+
+# ─── Антиспам ─────────────────────────────────────────────────────────
+def check_antispam(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = time.time()
+    c.execute("SELECT window_start, msg_count, blocked_until FROM antispam WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if row:
+        ws, mc, bu = row
+        if bu and now < bu:
+            conn.close()
+            return False, bu
+        if now - ws < ANTISPAM_WINDOW:
+            mc += 1
+            if mc > ANTISPAM_LIMIT:
+                new_bu = now + ANTISPAM_BLOCK_SEC
+                c.execute("UPDATE antispam SET msg_count=?, blocked_until=? WHERE user_id=?", (mc, new_bu, user_id))
+                conn.commit(); conn.close()
+                return False, new_bu
+            c.execute("UPDATE antispam SET msg_count=? WHERE user_id=?", (mc, user_id))
+        else:
+            c.execute("UPDATE antispam SET window_start=?, msg_count=1, blocked_until=0 WHERE user_id=?", (now, user_id))
+    else:
+        c.execute("INSERT INTO antispam (user_id, window_start, msg_count) VALUES (?,?,1)", (user_id, now))
+    conn.commit(); conn.close()
+    return True, 0.0
+
+# ─── Каналы ───────────────────────────────────────────────────────────
+def get_required_channels():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT channel_username FROM required_channels")
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def add_channel(username: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO required_channels (channel_username, channel_name) VALUES (?,?)", (username, username))
+    conn.commit(); conn.close()
+
+def remove_channel(username: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM required_channels WHERE channel_username=?", (username,))
+    ok = c.rowcount > 0
+    conn.commit(); conn.close()
+    return ok
+
+async def check_required_subs(user_id: int):
+    not_sub = []
+    for ch in get_required_channels():
+        try:
+            m = await bot.get_chat_member(ch, user_id)
+            if m.status in ("left", "kicked"):
+                not_sub.append(ch)
+        except Exception as e:
+            logging.warning(f"check_required_subs {ch}: {e}")
+    return not_sub
+
+# ─── Баны ─────────────────────────────────────────────────────────────
+def is_banned(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT banned, ban_reason FROM users WHERE chat_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0] == 'True':
+        return True, row[1]
+    return False, None
+
+def ban_user(user_id: int, reason: str = "Нарушение правил"):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET banned='True', ban_reason=? WHERE chat_id=?", (reason, user_id))
+    conn.commit(); conn.close()
+
+def unban_user(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET banned='False', ban_reason=NULL WHERE chat_id=?", (user_id,))
+    conn.commit(); conn.close()
+
+# ─── Активность ───────────────────────────────────────────────────────
+def inc_msg_count(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+    c.execute("UPDATE users SET msg_count=COALESCE(CAST(msg_count AS INTEGER),0)+1, last_active=? WHERE chat_id=?", (now, user_id))
+    conn.commit(); conn.close()
+
+def get_top_users(limit=10):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT chat_id, username, COALESCE(CAST(msg_count AS INTEGER),0) FROM users WHERE banned!='True' ORDER BY CAST(msg_count AS INTEGER) DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_bot_stats():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users"); total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE sub='True'"); paid = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE banned='True'"); banned = c.fetchone()[0]
+    today = datetime.datetime.now().strftime("%d.%m.%Y")
+    c.execute("SELECT COUNT(*) FROM users WHERE last_active LIKE ?", (f"{today}%",)); today_active = c.fetchone()[0]
+    conn.close()
+    return {"total": total, "paid": paid, "free": total-paid, "banned": banned, "today": today_active}
+
+# ─── Work-директория: автоочистка ─────────────────────────────────────
+def get_work_size_gb():
+    total = 0
+    p = Path('work')
+    if not p.exists(): return 0.0
+    for f in p.rglob('*'):
+        if f.is_file():
+            try: total += f.stat().st_size
+            except: pass
+    return total / (1024 ** 3)
+
+async def auto_cleanup():
+    if get_work_size_gb() < MAX_WORK_SIZE_GB:
+        return
+    logging.warning(f"[cleanup] work/ > {MAX_WORK_SIZE_GB} GB, чищу...")
+    work = Path('work')
+    dirs = []
+    for d in work.rglob('*'):
+        if d.is_dir() and d != work:
+            try: dirs.append((d.stat().st_mtime, d))
+            except: pass
+    dirs.sort(key=lambda x: x[0])
+    for _, d in dirs:
+        if get_work_size_gb() < MAX_WORK_SIZE_GB * 0.6:
+            break
+        shutil.rmtree(d, ignore_errors=True)
+
+# ─── Stars: подписки ──────────────────────────────────────────────────
+def save_invoice(payload: str, user_id: int, stars: int, days: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO pending_invoices (payload,user_id,stars,days,created_at) VALUES (?,?,?,?,?)",
+              (payload, user_id, stars, days, datetime.datetime.now().isoformat()))
+    conn.commit(); conn.close()
+
+def pop_invoice(payload: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id, stars, days FROM pending_invoices WHERE payload=?", (payload,))
+    row = c.fetchone()
+    if row:
+        c.execute("DELETE FROM pending_invoices WHERE payload=?", (payload,))
+    conn.commit(); conn.close()
+    return row
+
+def grant_subscription(user_id: int, days: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if days == -1:
+        expiry = "31.12.2099"
+    else:
+        expiry = (datetime.datetime.now() + datetime.timedelta(days=days)).strftime("%d.%m.%Y")
+    c.execute("UPDATE users SET sub='True', time=? WHERE chat_id=?", (expiry, user_id))
+    conn.commit(); conn.close()
+    return expiry
+
+async def send_invoice_for_plan(chat_id: int, user_id: int, plan: dict):
+    payload = f"sub_{plan['stars']}_{plan['days']}_{user_id}_{int(time.time())}"
+    save_invoice(payload, user_id, plan['stars'], plan['days'])
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title=f"{plan['emoji']} Premium {plan['label']}",
+        description=(
+            f"Подписка на {plan['label']}.\n"
+            "✅ Без ограничений по размеру файлов\n"
+            "✅ Приоритетная очередь\n"
+            "✅ Все функции без ограничений"
+        ),
+        payload=payload,
+        currency="XTR",
+        prices=[LabeledPrice(label=f"Premium {plan['label']}", amount=plan['stars'])],
+    )
+
+# ─── Клавиатуры ───────────────────────────────────────────────────────
+def kb_subscription_plans():
+    b = InlineKeyboardBuilder()
+    for p in SUBSCRIPTION_PLANS:
+        b.button(text=f"{p['emoji']} {p['label']} — {p['stars']} ⭐", callback_data=f"buy_{p['stars']}")
+    b.button(text="💬 Купить у владельца (@keedboy016)", url="https://t.me/keedboy016")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_check_channels(channels: list):
+    b = InlineKeyboardBuilder()
+    for ch in channels:
+        b.button(text=f"📢 {ch}", url=f"https://t.me/{ch.lstrip('@')}")
+    b.button(text="✅ Проверить подписку", callback_data="recheck_channels")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_admin_main():
+    b = InlineKeyboardBuilder()
+    b.button(text="📊 Статистика",      callback_data="adm_stats")
+    b.button(text="🏆 Топ активности",  callback_data="adm_top")
+    b.button(text="🚫 Баны",            callback_data="adm_bans_list")
+    b.button(text="📢 Рассылка",        callback_data="adm_broadcast")
+    b.button(text="📋 Создать опрос",   callback_data="adm_poll_create")
+    b.button(text="📣 Каналы подписки", callback_data="adm_channels")
+    b.button(text="🗑 Очистить work/",  callback_data="adm_cleanup")
+    b.adjust(2)
+    return b.as_markup()
+
+def kb_back_admin():
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    return b.as_markup()
+
+# ─── Тексты приветствий ───────────────────────────────────────────────
+def start_free_text():
+    return (
+        "👋 <b>Добро пожаловать в BR Assembly Bot!</b>\n\n"
+        "⚠️ <b>Вы используете бесплатную версию</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "❌ <b>Ограничения без подписки:</b>\n"
+        "  • Файлы не более <b>20 МБ</b>\n"
+        "  • Задержка <b>8–15 сек</b> перед обработкой\n"
+        "  • Ставитесь в очередь <b>за платными</b>\n"
+        "  • Обязательна подписка на 3 канала\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ <b>Преимущества Premium:</b>\n"
+        "  • Файлы до <b>2 ГБ</b>\n"
+        "  • <b>Мгновенная</b> обработка без очереди\n"
+        "  • Подписка на каналы <b>не нужна</b>\n"
+        "  • Все функции без ограничений\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💎 <b>Тарифы — оплата Telegram Stars ⭐:</b>"
+    )
+
+def start_paid_text(expiry: str):
+    forever = expiry == "31.12.2099"
+    until = "♾️ бессрочно" if forever else f"до <b>{expiry}</b>"
+    return (
+        f"👋 <b>С возвращением, Premium-пользователь!</b>\n\n"
+        f"💎 Подписка активна — {until}\n\n"
+        "Все функции без ограничений. Команды — /help"
+    )
+
+# ─── БД инициализация ─────────────────────────────────────────────────
+def initialize_database():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        chat_id INTEGER PRIMARY KEY,
+        username TEXT,
+        sub TEXT DEFAULT 'False',
+        admin TEXT DEFAULT 'False',
+        time TEXT
+    )''')
+    for col, defval in [("banned","'False'"),("ban_reason","NULL"),("msg_count","0"),("last_active","NULL")]:
+        try:
+            c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT {defval}")
+        except sqlite3.OperationalError:
+            pass
+    c.execute('''CREATE TABLE IF NOT EXISTS required_channels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_username TEXT UNIQUE NOT NULL,
+        channel_name TEXT
+    )''')
+    for ch in DEFAULT_CHANNELS:
+        c.execute("INSERT OR IGNORE INTO required_channels (channel_username, channel_name) VALUES (?,?)", (ch, ch))
+    c.execute('''CREATE TABLE IF NOT EXISTS broadcasts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT, sent_at TEXT, sent_by INTEGER, total_sent INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS polls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        question TEXT NOT NULL, options TEXT NOT NULL,
+        created_at TEXT, created_by INTEGER, is_active INTEGER DEFAULT 1
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS antispam (
+        user_id INTEGER PRIMARY KEY,
+        window_start REAL DEFAULT 0,
+        msg_count INTEGER DEFAULT 0,
+        blocked_until REAL DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS pending_invoices (
+        payload TEXT PRIMARY KEY,
+        user_id INTEGER, stars INTEGER, days INTEGER, created_at TEXT
+    )''')
+    conn.commit()
+    conn.close()
+
+initialize_database()
+
+async def save_workbook_to_disk():
+    pass
+
+async def update(chat_id, username):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    current_date = datetime.datetime.now().date()
+    message_to_send = None
+    sub = False
+    cursor.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,))
+    user = cursor.fetchone()
+    if user:
+        db_chat_id, db_username, db_sub_status, db_admin_status, db_expiration_date_str = user[0], user[1], user[2], user[3], user[4]
+        if db_expiration_date_str:
+            expiration_date = datetime.datetime.strptime(db_expiration_date_str, "%d.%m.%Y").date()
+            if expiration_date <= current_date:
+                sub = True
+                cursor.execute("UPDATE users SET sub='False', time=NULL WHERE chat_id=?", (chat_id,))
+                message_to_send = "⚠️ Ваша подписка закончилась!"
+        if db_username != username:
+            cursor.execute("UPDATE users SET username=? WHERE chat_id=?", (username, chat_id))
+    else:
+        cursor.execute("INSERT INTO users (chat_id, username, sub, admin, time) VALUES (?, ?, 'False', 'False', NULL)",
+                       (chat_id, username))
+    conn.commit()
+    conn.close()
+    return sub, message_to_send
+
+def find_user_data_in_sql(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sub, time FROM users WHERE chat_id=?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        return result[0] == 'True', result[1]
+    return False, None
+
+async def get_user_status_async(user_id):
+    return await asyncio.to_thread(find_user_data_in_sql, user_id)
+
+def execute_sql_query(query, params=(), fetchone=False, fetchall=False):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    if fetchone:
+        result = cursor.fetchone()
+        conn.close()
+        return result
+    if fetchall:
+        result = cursor.fetchall()
+        conn.close()
+        return result
+    conn.commit()
+    conn.close()
+
+# ─── Weapon ───────────────────────────────────────────────────────────
 def apply_weapon_params(folder: str, PT: int, RAZB: int):
     wj_path = os.path.join(folder, "weapon.json")
     if os.path.exists(wj_path):
@@ -139,7 +553,6 @@ def apply_weapon_params(folder: str, PT: int, RAZB: int):
                 break
         with open(wj_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-
     wo_path = os.path.join(folder, "weapon_overrides.json")
     if os.path.exists(wo_path):
         with open(wo_path, "r", encoding="utf-8") as f:
@@ -149,7 +562,6 @@ def apply_weapon_params(folder: str, PT: int, RAZB: int):
             data["weapons"]["DESERT_EAGLE"]["accuracy"] = RAZB
         with open(wo_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
-
     wp_path = os.path.join(folder, "weapon_presets.json")
     if os.path.exists(wp_path):
         with open(wp_path, "r", encoding="utf-8") as f:
@@ -161,47 +573,29 @@ def apply_weapon_params(folder: str, PT: int, RAZB: int):
         with open(wp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
 
-
 def build_weapon_zip(tmp_folder: str, zip_path: str):
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for fname in os.listdir(tmp_folder):
             zf.write(os.path.join(tmp_folder, fname), fname)
 
-class OverlayStates(StatesGroup):
-    waiting_for_second_image = State()
-
+# ─── Логирование ──────────────────────────────────────────────────────
 async def send_log(message: types.Message, content_type: str = "текст", extra: str = ""):
     try:
-        user      = message.from_user
-        now       = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        uid       = user.id
-        uname     = f"@{user.username}" if user.username else "нет юзернейма"
+        user = message.from_user
+        now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        uid = user.id
+        uname = f"@{user.username}" if user.username else "нет юзернейма"
         full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
-        caption   = message.caption or ""
-
-        type_icons = {
-            "текст": "💬", "фото": "🖼", "стикер": "🎭", "гифка": "🎞",
-            "видео": "🎬", "голосовое": "🎤", "аудио": "🎵", "файл": "📁",
-            "видео-сообщение": "📹", "контакт": "👤", "геолокация": "📍",
-            "опрос": "📊", "история": "📖",
-        }
+        caption = message.caption or ""
+        type_icons = {"текст":"💬","фото":"🖼","стикер":"🎭","гифка":"🎞","видео":"🎬","голосовое":"🎤",
+                      "аудио":"🎵","файл":"📁","видео-сообщение":"📹","контакт":"👤","геолокация":"📍","опрос":"📊","история":"📖"}
         icon = type_icons.get(content_type, "📋")
-
-        lines = [
-            f"{icon} <b>Лог: {content_type}</b>",
-            f"📅 <code>{now}</code>",
-            f"👤 <b>{full_name}</b>  {uname}",
-            f"🆔 <code>{uid}</code>",
-        ]
-
+        lines = [f"{icon} <b>Лог: {content_type}</b>", f"📅 <code>{now}</code>",
+                 f"👤 <b>{full_name}</b>  {uname}", f"🆔 <code>{uid}</code>"]
         if message.chat.type != "private":
             lines.append(f"💬 Чат: <code>{message.chat.id}</code> ({message.chat.title or ''})")
-
-        if extra:
-            lines.append(f"ℹ️ {extra}")
-        if caption:
-            lines.append(f"💬 Подпись: {caption}")
-
+        if extra: lines.append(f"ℹ️ {extra}")
+        if caption: lines.append(f"💬 Подпись: {caption}")
         if message.sticker:
             s = message.sticker
             lines.append(f"😄 Emoji: {s.emoji or '—'}  |  Набор: {s.set_name or '—'}")
@@ -215,87 +609,50 @@ async def send_log(message: types.Message, content_type: str = "текст", ext
         elif message.video:
             v = message.video
             lines.append(f"⏱ Длит.: {v.duration}с  |  {v.width}×{v.height}  |  {round(v.file_size/1024/1024,2)} МБ")
-        elif message.animation:
-            a = message.animation
-            lines.append(f"⏱ Длит.: {a.duration}с  |  {a.width}×{a.height}")
-        elif message.voice:
-            lines.append(f"⏱ Длит.: {message.voice.duration}с")
-        elif message.audio:
-            au = message.audio
-            lines.append(f"🎵 {au.performer or '—'} — {au.title or '—'}  |  {au.duration}с")
-        elif message.video_note:
-            lines.append(f"⏱ Длит.: {message.video_note.duration}с")
-        elif message.contact:
-            c = message.contact
-            lines.append(f"📞 {c.first_name} {c.last_name or ''}  |  {c.phone_number}")
-        elif message.location:
-            loc = message.location
-            lines.append(f"🗺 lat={loc.latitude}  lon={loc.longitude}")
         elif message.text:
             preview = message.text[:200] + ("…" if len(message.text) > 200 else "")
             lines.append(f"✉️ {preview}")
-
         text = "\n".join(lines)
         for chat_id in loging_id:
             await boti.send_message(chat_id, text, parse_mode="HTML")
-            try:
-                await message.forward(chat_id)
-            except Exception:
-                pass
+            try: await message.forward(chat_id)
+            except: pass
     except Exception as e:
         logging.warning(f"send_log error: {e}")
 
+# ─── Overlay ──────────────────────────────────────────────────────────
 def _process_overlay_logic(base_input, overlay_input, mode, alpha_pct):
     base = Image.open(base_input).convert("RGBA")
     overlay = Image.open(overlay_input).convert("RGBA")
     overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
-    if mode == "multiply":
-        effect = ImageChops.multiply(base, overlay)
-    elif mode == "screen":
-        effect = ImageChops.screen(base, overlay)
-        effect = ImageChops.screen(effect, overlay)
-    elif mode == "overlay":
-        effect = ImageChops.overlay(base, overlay)
-        effect = ImageChops.overlay(effect, overlay)
-    elif mode == "add":
-        effect = ImageChops.add(base, overlay)
-    elif mode == "darker":
-        effect = ImageChops.darker(base, overlay)
-    else:
-        effect = overlay
+    if mode == "multiply": effect = ImageChops.multiply(base, overlay)
+    elif mode == "screen": effect = ImageChops.screen(ImageChops.screen(base, overlay), overlay)
+    elif mode == "overlay": effect = ImageChops.overlay(ImageChops.overlay(base, overlay), overlay)
+    elif mode == "add": effect = ImageChops.add(base, overlay)
+    elif mode == "darker": effect = ImageChops.darker(base, overlay)
+    else: effect = overlay
     base_alpha = base.split()[3]
     user_alpha_level = int(255 * (alpha_pct / 100.0))
     mask = ImageChops.darker(base_alpha, Image.new("L", base.size, user_alpha_level))
     final = Image.composite(effect, base, mask)
     img_byte_arr = io.BytesIO()
-    is_png = getattr(base, 'format', '').upper() == 'PNG'
-    if is_png:
-        final.save(img_byte_arr, format='PNG')
-    else:
-        final.convert("RGBA").save(img_byte_arr, format='PNG')
+    final.convert("RGBA").save(img_byte_arr, format='PNG')
     return img_byte_arr.getvalue()
 
-
 def _process_zip_overlay(zip_path, overlay_img_path, mode, alpha_pct):
-    import zipfile
     output_zip_buffer = io.BytesIO()
-
     with zipfile.ZipFile(zip_path, 'r') as archive_in:
         with zipfile.ZipFile(output_zip_buffer, 'a', zipfile.ZIP_DEFLATED) as archive_out:
             for file_info in archive_in.infolist():
                 if file_info.is_dir() or file_info.filename.startswith('__MACOSX') or \
                         not file_info.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                     continue
-
                 with archive_in.open(file_info) as file:
                     try:
                         img_bytes = io.BytesIO(file.read())
                         processed_bytes = _process_overlay_logic(img_bytes, overlay_img_path, mode, alpha_pct)
                         archive_out.writestr(file_info.filename, processed_bytes)
-                    except Exception as e:
-                        print(f"Ошибка при обработке файла {file_info.filename}: {e}")
-                        continue
-
+                    except: continue
     output_zip_buffer.seek(0)
     return output_zip_buffer
 
@@ -308,15 +665,12 @@ async def create_palette_image(image_path, file_name, n_colors=10, output_file="
     kmeans.fit(pixels)
     colors = kmeans.cluster_centers_.astype(int)
     hex_colors = ['#{:02x}{:02x}{:02x}'.format(r, g, b).upper() for r, g, b in colors]
-    width = 1000
-    height = 200
+    width, height = 1000, 200
     swatch_width = width // n_colors
     palette_img = Image.new('RGB', (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(palette_img)
-    try:
-        font = ImageFont.truetype("arial.ttf", 16)
-    except:
-        font = ImageFont.load_default()
+    try: font = ImageFont.truetype("arial.ttf", 16)
+    except: font = ImageFont.load_default()
     o = f"Основные цвета изображения {file_name}:\n"
     for i, color in enumerate(colors):
         hex_val = hex_colors[i]
@@ -334,28 +688,17 @@ def random_color():
     s = random.uniform(0.5, 0.8)
     l = random.uniform(0.4, 0.7)
     r, g, b = colorsys.hls_to_rgb(h, l, s)
-    return '#{:02x}{:02x}{:02x}'.format(
-        int(r * 255),
-        int(g * 255),
-        int(b * 255)
-    ).upper()
+    return '#{:02x}{:02x}{:02x}'.format(int(r*255), int(g*255), int(b*255)).upper()
 
 def get_hex_from_description(description):
     desc_clean = description.strip().lower()
     completion = client.chat.completions.create(
-        messages=[
-            {"role": "system",
-             "content": "Ты эксперт по колористике. Отвечай ТОЛЬКО hex-кодом (например, #FFFFFF), без лишних слов."},
-            {"role": "user", "content": f"Цвет: {desc_clean}"}
-        ],
-        model="llama-3.1-8b-instant",
-        temperature=0.1,
-    )
+        messages=[{"role":"system","content":"Ты эксперт по колористике. Отвечай ТОЛЬКО hex-кодом (например, #FFFFFF), без лишних слов."},
+                  {"role":"user","content":f"Цвет: {desc_clean}"}],
+        model="llama-3.1-8b-instant", temperature=0.1)
     hex_response = completion.choices[0].message.content.strip()
     match = re.search(r'#[A-Fa-f0-9]{6}', hex_response)
-    final_hex = match.group(0).upper()
-    return final_hex
-
+    return match.group(0).upper()
 
 def convert_zip2nonerai(src_file, temp_dir):
     temp_dir1 = Path(temp_dir)
@@ -396,21 +739,7 @@ def convert_zip2nonerai(src_file, temp_dir):
     with zipfile.ZipFile(out_name, 'w', zipfile.ZIP_STORED) as z:
         for f in build.rglob('*'):
             if f.is_file(): z.write(f, f.relative_to(build))
-    name = f"{temp_dir}/{Path(src_file).stem}_converted.nonerai"
     return out_name
-
-
-def compute_data_offset(zip_path: Path, header_offset: int) -> int:
-    with zip_path.open('rb') as f:
-        f.seek(header_offset)
-        header = f.read(30)
-        if len(header) < 30:
-            raise IOError(f"Unexpected short local header at offset {header_offset}")
-        file_name_len = int.from_bytes(header[26:28], 'little')
-        extra_field_len = int.from_bytes(header[28:30], 'little')
-        data_offset = header_offset + 30 + file_name_len + extra_field_len
-        return data_offset
-
 
 def compute_data_offset(zip_path, header_offset):
     with open(zip_path, 'rb') as f:
@@ -418,8 +747,6 @@ def compute_data_offset(zip_path, header_offset):
         n = struct.unpack('<H', f.read(2))[0]
         m = struct.unpack('<H', f.read(2))[0]
         return header_offset + 30 + n + m
-
-
 
 def generate_bpcmeta(zip_path_str, output_path_str):
     zip_path = Path(zip_path_str)
@@ -432,12 +759,8 @@ def generate_bpcmeta(zip_path_str, output_path_str):
             if not lower.endswith(('.mp3', '.wav', '.ogg')): continue
             header_offset = getattr(info, 'header_offset', None)
             data_offset = compute_data_offset(str(zip_path), header_offset)
-            entries.append({
-                'name': info.filename,
-                'data_offset': int(data_offset),
-                'comp_size': int(info.compress_size),
-                'is_mp3': 1 if lower.endswith('.mp3') else 0
-            })
+            entries.append({'name': info.filename, 'data_offset': int(data_offset),
+                            'comp_size': int(info.compress_size), 'is_mp3': 1 if lower.endswith('.mp3') else 0})
     entries.sort(key=lambda e: e['name'].lower())
     out = bytearray()
     out += struct.pack('<I', len(entries))
@@ -449,14 +772,11 @@ def generate_bpcmeta(zip_path_str, output_path_str):
         out += struct.pack('<H', len(name_bytes))
         out += name_bytes
     out_path.write_bytes(out)
-    print(f"bpcmeta: {out_path}  ({len(out)} bytes) -- entries: {len(entries)}")
-
 
 def ror32(x: int, r: int) -> int:
     return ((x >> r) | (x << (32 - r))) & 0xFFFFFFFF
 
-
-def tea_decrypt_block(data: bytearray, key: list[int], rounds: int = 8) -> None:
+def tea_decrypt_block(data: bytearray, key: list, rounds: int = 8) -> None:
     delta = 0x61C88647
     for offset in range(0, len(data), 8):
         v0, v1 = struct.unpack_from('<II', data, offset)
@@ -468,25 +788,19 @@ def tea_decrypt_block(data: bytearray, key: list[int], rounds: int = 8) -> None:
             v0 = (v0 - (new_sum ^ (key[0] + (v1 << 4)) ^ (key[1] + (v1 >> 5)))) & 0xFFFFFFFF
         struct.pack_into('<II', data, offset, v0, v1)
 
-
 def patch_dff_header(dff_data: bytearray) -> bytearray:
-    if len(dff_data) < 12:
-        return dff_data
+    if len(dff_data) < 12: return dff_data
     real_size = len(dff_data) - 12
     return dff_data[:4] + struct.pack('<I', real_size) + dff_data[8:]
 
-
 def clean_dff_data(dff_data: bytearray) -> bytearray:
     end = len(dff_data)
-    while end > 0 and dff_data[end - 1] == 0:
-        end -= 1
+    while end > 0 and dff_data[end - 1] == 0: end -= 1
     return dff_data[:end]
 
-
 def decrypt_mod_to_dff(mod_bytes: bytes) -> bytes:
-    magic, length, num_blocks = struct.unpack_from('<III', mod_bytes, 0)
-    if magic != 0xAB921033:
-        raise ValueError("invalid .mod file")
+    magic, length_val, num_blocks = struct.unpack_from('<III', mod_bytes, 0)
+    if magic != 0xAB921033: raise ValueError("invalid .mod file")
     base_key = [0x6ED9EE7A, 0x930C666B, 0x930E166B, 0x4709EE79]
     key = [ror32(k ^ 0x12913AFB, 19) for k in base_key]
     data = bytearray(mod_bytes)
@@ -496,221 +810,122 @@ def decrypt_mod_to_dff(mod_bytes: bytes) -> bytes:
         tea_decrypt_block(block, key)
         data[offset:offset + 0x800] = block
         offset += 0x800
-
-    actual_length = min(length, len(mod_bytes) - 28)
+    actual_length = min(length_val, len(mod_bytes) - 28)
     dff = bytearray(data[28:28 + actual_length])
     dff = patch_dff_header(dff)
     dff = clean_dff_data(dff)
     return bytes(dff)
 
-
 async def convert_one(mod_path: str, out_dir: str, log=None):
     name = os.path.splitext(os.path.basename(mod_path))[0]
-    if log:
-        log(f"[~] MOD → {name}.dff")
     os.makedirs(out_dir, exist_ok=True)
     try:
         mod_bytes = open(mod_path, 'rb').read()
         dff_bytes = decrypt_mod_to_dff(mod_bytes)
         out_path = os.path.join(out_dir, name + '.dff')
-        with open(out_path, 'wb') as out_f:
-            out_f.write(dff_bytes)
-        print(f"[✓] {name}.dff")
+        with open(out_path, 'wb') as out_f: out_f.write(dff_bytes)
     except Exception as e:
         print(f"[X] error {name}: {e}")
 
-
-async def batch(mod_paths: list[str], out_dir: str, log=None):
-    tasks = [convert_one(p, out_dir, log) for p in mod_paths]
-    await asyncio.gather(*tasks)
-
-
-async def convert(mod_paths: list[str], out_dir: str, log=None):
-    await batch(mod_paths, out_dir, log)
-
-
-async def convert_timecyc_dat_to_json(input_path: Path, original_filename: str, temp_dir):
+async def convert_timecyc_dat_to_json(input_path, original_filename, temp_dir):
     try:
-        with open(input_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-
+        with open(input_path, 'r', encoding='utf-8') as f: content = f.read()
         entries = []
-        current_entry = None
-
         for line in content.splitlines():
             line = line.strip()
-            if not line or line.startswith(';'):
-                continue
-
+            if not line or line.startswith(';'): continue
             parts = re.split(r'\s+', line)
-            if len(parts) < 48:
-                continue
-
+            if len(parts) < 48: continue
             entry = {
-                "AmbientRGB": [int(parts[0]), int(parts[1]), int(parts[2])],
-                "AmbientPhysicalRGB": [int(parts[3]), int(parts[4]), int(parts[5])],
-                "DirectionalRGB": [int(parts[6]), int(parts[7]), int(parts[8])],
-                "SkyTopRGB": [int(parts[9]), int(parts[10]), int(parts[11])],
-                "SkyBottomRGB": [int(parts[12]), int(parts[13]), int(parts[14])],
-                "SunCoreRGB": [int(parts[15]), int(parts[16]), int(parts[17])],
-                "SunCoronaRGB": [int(parts[18]), int(parts[19]), int(parts[20])],
-                "SunSize": float(parts[21]),
-                "SpriteSize": float(parts[22]),
-                "SpriteBrght": float(parts[23]),
-                "Shad": int(parts[24]),
-                "LightShad": int(parts[25]),
-                "PoleShad": int(parts[26]),
-                "FarClip": float(parts[27]),
-                "FogStart": float(parts[28]),
-                "LightGnd": float(parts[29]),
-                "FluffyBottomRGB": [int(parts[30]), int(parts[31]), int(parts[32])],
-                "CloudRGB": [int(parts[33]), int(parts[34]), int(parts[35])],
-                "WaterRGBA": [int(parts[36]), int(parts[37]), int(parts[38]), int(parts[39])],
-                "PostFX1ARGB": [int(parts[40]), int(parts[41]), int(parts[42]), int(parts[43])],
-                "PostFX2ARGB": [int(parts[44]), int(parts[45]), int(parts[46]), int(parts[47])],
-                "CloudAlpha": int(parts[48]) if len(parts) > 48 else 200
+                "AmbientRGB":[int(parts[0]),int(parts[1]),int(parts[2])],
+                "AmbientPhysicalRGB":[int(parts[3]),int(parts[4]),int(parts[5])],
+                "DirectionalRGB":[int(parts[6]),int(parts[7]),int(parts[8])],
+                "SkyTopRGB":[int(parts[9]),int(parts[10]),int(parts[11])],
+                "SkyBottomRGB":[int(parts[12]),int(parts[13]),int(parts[14])],
+                "SunCoreRGB":[int(parts[15]),int(parts[16]),int(parts[17])],
+                "SunCoronaRGB":[int(parts[18]),int(parts[19]),int(parts[20])],
+                "SunSize":float(parts[21]),"SpriteSize":float(parts[22]),"SpriteBrght":float(parts[23]),
+                "Shad":int(parts[24]),"LightShad":int(parts[25]),"PoleShad":int(parts[26]),
+                "FarClip":float(parts[27]),"FogStart":float(parts[28]),"LightGnd":float(parts[29]),
+                "FluffyBottomRGB":[int(parts[30]),int(parts[31]),int(parts[32])],
+                "CloudRGB":[int(parts[33]),int(parts[34]),int(parts[35])],
+                "WaterRGBA":[int(parts[36]),int(parts[37]),int(parts[38]),int(parts[39])],
+                "PostFX1ARGB":[int(parts[40]),int(parts[41]),int(parts[42]),int(parts[43])],
+                "PostFX2ARGB":[int(parts[44]),int(parts[45]),int(parts[46]),int(parts[47])],
+                "CloudAlpha":int(parts[48]) if len(parts) > 48 else 200
             }
             entries.append(entry)
-
         json_data = json.dumps(entries, indent=2)
-
         output_filename = Path(original_filename).stem + '.json'
-        output_path = temp_dir / output_filename
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(json_data)
-
+        output_path = Path(temp_dir) / output_filename
+        with open(output_path, 'w', encoding='utf-8') as f: f.write(json_data)
         return output_path
     except Exception as e:
         print(f"Error converting DAT to JSON: {e}")
         return None
 
-
-async def safe_delete(file_path: Path, max_attempts=3):
+async def safe_delete(file_path, max_attempts=3):
     for attempt in range(max_attempts):
         try:
             if file_path.exists():
-                if file_path.is_dir():
-                    shutil.rmtree(file_path, ignore_errors=True)
-                else:
-                    file_path.unlink(missing_ok=True)
+                if file_path.is_dir(): shutil.rmtree(file_path, ignore_errors=True)
+                else: file_path.unlink(missing_ok=True)
                 return True
-        except Exception:
-            await asyncio.sleep(0.5 * (attempt + 1))
+        except: await asyncio.sleep(0.5 * (attempt + 1))
     return False
 
-
-BTX_QUALITY_MAP = {
-    "fastest":    0.0,
-    "fast":       10.0,
-    "medium":     60.0,
-    "thorough":   98.0,
-    "exhaustive": 100.0,
-}
-
-BTX_BLOCK_MAP = {
-    "4x4": (4, 4), "6x6": (6, 6), "8x8": (8, 8),
-    "5x5": (5, 5), "8x5": (8, 5), "8x6": (8, 6),
-    "10x10": (10, 10), "12x12": (12, 12),
-}
-
-BTX_DEFAULT_BLOCK   = (8, 8)
+BTX_QUALITY_MAP = {"fastest":0.0,"fast":10.0,"medium":60.0,"thorough":98.0,"exhaustive":100.0}
+BTX_BLOCK_MAP = {"4x4":(4,4),"6x6":(6,6),"8x8":(8,8),"5x5":(5,5),"8x5":(8,5),"8x6":(8,6),"10x10":(10,10),"12x12":(12,12)}
+BTX_DEFAULT_BLOCK = (8, 8)
 BTX_DEFAULT_QUALITY = 60.0
-
-btx_user_settings: dict[int, dict] = {}
-
+btx_user_settings: dict = {}
 
 def _btx_internal_format(block_w: int, block_h: int) -> int:
-    return {
-        (4, 4): 0x93B0, (5, 5): 0x93B2, (6, 6): 0x93B4,
-        (8, 5): 0x93B5, (8, 6): 0x93B6, (8, 8): 0x93B7,
-        (10,10): 0x93BB, (12,12): 0x93BD,
-    }[(block_w, block_h)]
+    return {(4,4):0x93B0,(5,5):0x93B2,(6,6):0x93B4,(8,5):0x93B5,(8,6):0x93B6,(8,8):0x93B7,(10,10):0x93BB,(12,12):0x93BD}[(block_w,block_h)]
 
-
-def _compress_to_btx_bytes(img: Image.Image, block_w: int = 8, block_h: int = 8, quality: float = 60.0) -> bytes:
+def _compress_to_btx_bytes(img, block_w=8, block_h=8, quality=60.0):
     from astc_encoder import ASTCConfig, ASTCContext, ASTCImage, ASTCProfile, ASTCSwizzle, ASTCType
     img = img.convert("RGBA")
     w, h = img.size
-    cfg  = ASTCConfig(ASTCProfile.LDR, block_w, block_h, 1, quality)
-    ctx  = ASTCContext(cfg)
+    cfg = ASTCConfig(ASTCProfile.LDR, block_w, block_h, 1, quality)
+    ctx = ASTCContext(cfg)
     aimg = ASTCImage(ASTCType.U8, w, h, data=img.tobytes())
     comp = ctx.compress(aimg, ASTCSwizzle.from_str("RGBA"))
-
     ktx_id = bytes([0xAB,0x4B,0x54,0x58,0x20,0x31,0x31,0xBB,0x0D,0x0A,0x1A,0x0A])
-    hdr = struct.pack("<13I",
-        0x04030201, 0, 1, 0,
-        _btx_internal_format(block_w, block_h),
-        0x1908, w, h, 0, 0, 1, 1, 0)
+    hdr = struct.pack("<13I",0x04030201,0,1,0,_btx_internal_format(block_w,block_h),0x1908,w,h,0,0,1,1,0)
     return b'\x02\x00\x00\x00' + ktx_id + hdr + struct.pack("<I", len(comp)) + comp
 
-
-def _decompress_from_btx_bytes(data: bytes) -> Image.Image:
+def _decompress_from_btx_bytes(data):
     from astc_encoder import ASTCConfig, ASTCContext, ASTCImage, ASTCProfile, ASTCSwizzle, ASTCType
-    FORMAT_MAP = {v: k for k, v in {
-        (4,4):0x93B0,(5,5):0x93B2,(6,6):0x93B4,
-        (8,5):0x93B5,(8,6):0x93B6,(8,8):0x93B7,
-        (10,10):0x93BB,(12,12):0x93BD,
-    }.items()}
+    FORMAT_MAP = {v: k for k, v in {(4,4):0x93B0,(5,5):0x93B2,(6,6):0x93B4,(8,5):0x93B5,(8,6):0x93B6,(8,8):0x93B7,(10,10):0x93BB,(12,12):0x93BD}.items()}
     offset = 4 + 12
     hdr = struct.unpack_from("<13I", data, offset)
     gl_fmt, w, h = hdr[4], hdr[6], hdr[7]
     block_w, block_h = FORMAT_MAP[gl_fmt]
     comp = data[offset + 52 + 4:]
-    cfg  = ASTCConfig(ASTCProfile.LDR, block_w, block_h, 1, 60.0)
-    ctx  = ASTCContext(cfg)
+    cfg = ASTCConfig(ASTCProfile.LDR, block_w, block_h, 1, 60.0)
+    ctx = ASTCContext(cfg)
     aimg = ASTCImage(ASTCType.U8, w, h)
     ctx.decompress(comp, aimg, ASTCSwizzle.from_str("RGBA"))
     return Image.frombytes("RGBA", (w, h), bytes(aimg.data))
 
-
-async def convert_png_to_btx_pvr(input_path: Path, temp_ktx: Path,
-                                  block_w: int = 8, block_h: int = 8, quality: float = 60.0) -> bool:
+async def convert_png_to_btx(input_path, original_filename, temp_dir, block_w=8, block_h=8, quality=60.0):
     try:
         loop = asyncio.get_event_loop()
-        img  = await loop.run_in_executor(None, Image.open, str(input_path))
-        btx  = await loop.run_in_executor(None, _compress_to_btx_bytes, img, block_w, block_h, quality)
-        async with aiofiles.open(str(temp_ktx), "wb") as f:
-            await f.write(btx)
-        return True
-    except Exception as e:
-        logging.error(f"convert_png_to_btx_pvr: {e}")
-        return False
-
-
-async def convert_png_to_btx(input_path: Path, original_filename: str, temp_dir,
-                              block_w: int = 8, block_h: int = 8, quality: float = 60.0):
-    try:
-        loop     = asyncio.get_event_loop()
-        img      = await loop.run_in_executor(None, Image.open, str(input_path))
-        btx      = await loop.run_in_executor(None, _compress_to_btx_bytes, img, block_w, block_h, quality)
+        img = await loop.run_in_executor(None, Image.open, str(input_path))
+        btx = await loop.run_in_executor(None, _compress_to_btx_bytes, img, block_w, block_h, quality)
         out_name = Path(temp_dir) / (Path(original_filename).stem + ".btx")
-        async with aiofiles.open(str(out_name), "wb") as f:
-            await f.write(btx)
+        async with aiofiles.open(str(out_name), "wb") as f: await f.write(btx)
         return out_name
     except Exception as e:
         logging.error(f"convert_png_to_btx: {e}")
         return None
 
-
-async def convert_btx_to_png_pvr(temp_ktx, output_path):
+async def convert_btx_to_png(input_path, original_filename, temp_dir):
     try:
-        async with aiofiles.open(str(temp_ktx), "rb") as f:
-            data = await f.read()
+        async with aiofiles.open(str(input_path), "rb") as f: data = await f.read()
         loop = asyncio.get_event_loop()
-        img  = await loop.run_in_executor(None, _decompress_from_btx_bytes, data)
-        await loop.run_in_executor(None, img.save, str(output_path), "PNG")
-        return True
-    except Exception as e:
-        logging.error(f"convert_btx_to_png_pvr: {e}")
-        return False
-
-
-async def convert_btx_to_png(input_path, original_filename: str, temp_dir):
-    try:
-        async with aiofiles.open(str(input_path), "rb") as f:
-            data = await f.read()
-        loop     = asyncio.get_event_loop()
-        img      = await loop.run_in_executor(None, _decompress_from_btx_bytes, data)
+        img = await loop.run_in_executor(None, _decompress_from_btx_bytes, data)
         out_name = Path(temp_dir) / (Path(original_filename).stem + ".png")
         await loop.run_in_executor(None, img.save, str(out_name), "PNG")
         return out_name
@@ -718,139 +933,87 @@ async def convert_btx_to_png(input_path, original_filename: str, temp_dir):
         logging.error(f"convert_btx_to_png: {e}")
         return None
 
-
-async def process_bpc_file(file_name, message: types.Message, r, temp_dir):
+async def convert_png_to_btx_pvr(input_path, temp_ktx, block_w=8, block_h=8, quality=60.0):
     try:
-        file_path = os.path.join(temp_dir, file_name)
+        loop = asyncio.get_event_loop()
+        img = await loop.run_in_executor(None, Image.open, str(input_path))
+        btx = await loop.run_in_executor(None, _compress_to_btx_bytes, img, block_w, block_h, quality)
+        async with aiofiles.open(str(temp_ktx), "wb") as f: await f.write(btx)
+        return True
+    except Exception as e:
+        logging.error(f"convert_png_to_btx_pvr: {e}")
+        return False
 
-        decrypted_file = os.path.join(temp_dir, "decrypted_file")
-        encrypted = read_file_bytes(file_path)
-        xor_key = detect_key_pattern(encrypted)
-
-        decrypted = bytearray()
-        for i in range(len(encrypted)):
-            decrypted.append(encrypted[i] ^ xor_key[i % len(xor_key)])
-
-        write_bytes_to_file(decrypted_file, decrypted)
-
-        if zipfile.is_zipfile(decrypted_file):
-            content_dir = os.path.join(temp_dir, "content")
-            os.makedirs(content_dir, exist_ok=True)
-
-            with zipfile.ZipFile(decrypted_file, 'r') as zip_ref:
-                zip_ref.extractall(content_dir)
-
-            zip_filename = f"{r}_common.zip"
-            zip_path = os.path.join(temp_dir, zip_filename)
-
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for root, _, files in os.walk(content_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, content_dir)
-                        zipf.write(file_path, arcname)
-
-            name = message.from_user.first_name
-            await t_client.send_file(message.chat.id, zip_path, caption='<b>⚡️Ваш файл готов!</b>',
-                                     parse_mode="HTML", force_document=True)
-
-        else:
-            name = message.from_user.first_name
-            await t_client.send_file(message.chat.id, decrypted_file,
-                                     caption='<b>⚡️Ваш файл готов!</b>', parse_mode="HTML", force_document=True)
-
-    finally:
-        if os.path.exists(temp_dir):
-            rmtree(temp_dir, ignore_errors=True)
-
-
-async def process_zip_file(file_name, message: types.Message, r, temp_dir):
-    file_path = os.path.join(temp_dir, file_name)
-
-    encrypted_file = os.path.join(temp_dir, f"{r}_common.bpc")
-    original_data = read_file_bytes(file_path)
-    xor_key = bytes.fromhex('31 63 4b 31 61 35 55 46 32 74 55 38 2a 47 32 6c 57 23 26 25')
-
-    encrypted = bytearray()
-    for i in range(len(original_data)):
-        encrypted.append(original_data[i] ^ xor_key[i % len(xor_key)])
-
-    write_bytes_to_file(encrypted_file, encrypted)
-    await t_client.send_file(message.chat.id, encrypted_file, caption='<b>⚡️Ваш файл готов!</b>',
-                             parse_mode="HTML", force_document=True)
-
+async def convert_btx_to_png_pvr(temp_ktx, output_path):
+    try:
+        async with aiofiles.open(str(temp_ktx), "rb") as f: data = await f.read()
+        loop = asyncio.get_event_loop()
+        img = await loop.run_in_executor(None, _decompress_from_btx_bytes, data)
+        await loop.run_in_executor(None, img.save, str(output_path), "PNG")
+        return True
+    except Exception as e:
+        logging.error(f"convert_btx_to_png_pvr: {e}")
+        return False
 
 def read_file_bytes(file_path):
-    with open(file_path, 'rb') as f:
-        return bytearray(f.read())
-
+    with open(file_path, 'rb') as f: return bytearray(f.read())
 
 def write_bytes_to_file(file_path, data):
-    with open(file_path, 'wb') as f:
-        f.write(data)
-
+    with open(file_path, 'wb') as f: f.write(data)
 
 def detect_key_pattern(encrypted_data):
-    signatures = {
-        'ZIP': b'PK',
-        'PNG': b'\x89PNG',
-        'JPEG': b'\xFF\xD8\xFF',
-        'GIF': b'GIF',
-        'PDF': b'%PDF'
-    }
-
+    signatures = {'ZIP': b'PK', 'PNG': b'\x89PNG', 'JPEG': b'\xFF\xD8\xFF', 'GIF': b'GIF', 'PDF': b'%PDF'}
     for key_len in [20, 16, 32, 8, 4]:
         test_key = bytearray()
         for i in range(key_len):
             for sig_type, sig_bytes in signatures.items():
-                if i < len(sig_bytes):
-                    test_key.append(encrypted_data[i] ^ sig_bytes[i])
-
+                if i < len(sig_bytes): test_key.append(encrypted_data[i] ^ sig_bytes[i])
         if test_key:
-            test_decrypted = bytes([encrypted_data[i] ^ test_key[i % len(test_key)]
-                                    for i in range(min(100, len(encrypted_data)))])
-
+            test_decrypted = bytes([encrypted_data[i] ^ test_key[i % len(test_key)] for i in range(min(100, len(encrypted_data)))])
             for sig_type, sig_bytes in signatures.items():
-                if test_decrypted.startswith(sig_bytes):
-                    return test_key
+                if test_decrypted.startswith(sig_bytes): return test_key
+    return bytes.fromhex('31 63 4b 31 61 35 55 46 32 74 55 38 2a 47 32 6c 57 23 26 25'.replace(' ',''))
 
-    return bytes.fromhex('31 63 4b 31 61 35 55 46 32 74 55 38 2a 47 32 6c 57 23 26 25')
-
-
-def is_valid_filename(filename):
-    pattern = r'(common|pweper\.common|common\s*\(\d+\))'
-    return (
-            re.search(pattern, filename, re.IGNORECASE) is not None and
-            filename.lower().endswith(('.zip', '.bpc'))
-    )
-
-
-async def handle_valid_files(message: types.Message, ):
-    name = message.from_user.first_name
-
-    progress_msg = await message.reply(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
-
+async def process_bpc_file(file_name, message: types.Message, r, temp_dir):
     try:
-        if message.document.file_name.lower().endswith('.bpc'):
-            await process_bpc_file(message.document, message)
-    except Exception as e:
-        name = message.from_user.first_name
-        await progress_msg.edit_text(f"<b>Произошла ошибка: {str(e)}</b>")
+        file_path = os.path.join(temp_dir, file_name)
+        decrypted_file = os.path.join(temp_dir, "decrypted_file")
+        encrypted = read_file_bytes(file_path)
+        xor_key = detect_key_pattern(encrypted)
+        decrypted = bytearray(encrypted[i] ^ xor_key[i % len(xor_key)] for i in range(len(encrypted)))
+        write_bytes_to_file(decrypted_file, decrypted)
+        if zipfile.is_zipfile(decrypted_file):
+            content_dir = os.path.join(temp_dir, "content")
+            os.makedirs(content_dir, exist_ok=True)
+            with zipfile.ZipFile(decrypted_file, 'r') as zip_ref: zip_ref.extractall(content_dir)
+            zip_filename = f"{r}_common.zip"
+            zip_path = os.path.join(temp_dir, zip_filename)
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, _, files in os.walk(content_dir):
+                    for file in files:
+                        file_path2 = os.path.join(root, file)
+                        zipf.write(file_path2, os.path.relpath(file_path2, content_dir))
+            await t_client.send_file(message.chat.id, zip_path, caption='<b>⚡️Ваш файл готов!</b>', parse_mode="HTML", force_document=True)
+        else:
+            await t_client.send_file(message.chat.id, decrypted_file, caption='<b>⚡️Ваш файл готов!</b>', parse_mode="HTML", force_document=True)
     finally:
-        try:
-            await progress_msg.delete()
-        except:
-            pass
+        if os.path.exists(temp_dir): rmtree(temp_dir, ignore_errors=True)
 
+async def process_zip_file(file_name, message: types.Message, r, temp_dir):
+    file_path = os.path.join(temp_dir, file_name)
+    encrypted_file = os.path.join(temp_dir, f"{r}_common.bpc")
+    original_data = read_file_bytes(file_path)
+    xor_key = bytes.fromhex('316 34b3161355546327455382a47326c572323 25'.replace(' ',''))
+    encrypted = bytearray(original_data[i] ^ xor_key[i % len(xor_key)] for i in range(len(original_data)))
+    write_bytes_to_file(encrypted_file, encrypted)
+    await t_client.send_file(message.chat.id, encrypted_file, caption='<b>⚡️Ваш файл готов!</b>', parse_mode="HTML", force_document=True)
 
 def rgb_to_hex(rgb):
     return f'#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x}'
 
-
 def process_json_file(filename):
     try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            content = f.read()
+        with open(filename, 'r', encoding='utf-8') as f: content = f.read()
     except FileNotFoundError:
         return "Файл не найден"
     colors_to_find = ["SkyBottomRGB", "SkyTopRGB", "CloudRGB", "SunCoreRGB"]
@@ -858,14 +1021,9 @@ def process_json_file(filename):
     for key in colors_to_find:
         pattern = rf'"{key}"\s*:\s*\[\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*\]'
         match = re.search(pattern, content)
-        if match:
-            hex_val = rgb_to_hex(match.groups())
-            results.append(f"{key}: {hex_val}")
-        else:
-            results.append(f"{key}: Не найден или кривой формат")
-
+        if match: results.append(f"{key}: {rgb_to_hex(match.groups())}")
+        else: results.append(f"{key}: Не найден или кривой формат")
     return "\n".join(results)
-
 
 def search_in_skins(query: str):
     results = []
@@ -873,78 +1031,44 @@ def search_in_skins(query: str):
         with open('Editing/skins.txt', 'r', encoding='utf-8') as file:
             current_id = None
             current_name = None
-
             for line in file:
                 line = line.strip()
-                if line.startswith("ID - "):
-                    current_id = line[5:]
+                if line.startswith("ID - "): current_id = line[5:]
                 elif line.startswith("NAME - "):
                     current_name = line[7:]
-
                     if current_id and current_name:
-                        if query == current_id:
-                            return [(current_id, current_name)]
-
+                        if query == current_id: return [(current_id, current_name)]
                         clean_query = query.lower().replace('.mod', '')
                         mod_name = current_name.lower().replace('.mod', '')
-
-                        if clean_query in mod_name:
-                            results.append((current_id, current_name))
-
-                        current_id = None
-                        current_name = None
-
+                        if clean_query in mod_name: results.append((current_id, current_name))
+                        current_id = None; current_name = None
     except Exception as e:
         print(f"Ошибка: {e}")
         return None
     return results
 
-
 async def filerpoisk(id_xyina: str, name_xyina: str, message):
     mod_name = name_xyina.replace('.mod', '').lower()
-
     dff_path = os.path.join('Editing', 'mod', f"{mod_name}.mod")
-    dff_file = None
-    if os.path.exists(dff_path):
-        dff_file = FSInputFile(dff_path)
-
+    dff_file = FSInputFile(dff_path) if os.path.exists(dff_path) else None
     zip_path = os.path.join('Editing', 'texture', f"texture_{mod_name}.zip")
-    zip_file = None
-    if os.path.exists(zip_path):
-        zip_file = FSInputFile(zip_path)
-
+    zip_file = FSInputFile(zip_path) if os.path.exists(zip_path) else None
     media_group = []
     text_parts = []
-
     if dff_file:
         media_group.append(InputMediaDocument(media=dff_file))
         text_parts.append(f"{mod_name}.mod")
-
     if zip_file:
-        if media_group:
-            media_group.append(InputMediaDocument(media=zip_file, caption=f"ID - {id_xyina}\nNAME - {name_xyina}"))
-        else:
-            media_group.append(InputMediaDocument(media=zip_file, caption=f"ID - {id_xyina}\nNAME - {name_xyina}"))
+        media_group.append(InputMediaDocument(media=zip_file, caption=f"ID - {id_xyina}\nNAME - {name_xyina}"))
         text_parts.append(f"texture_{mod_name}.zip")
-
-    if media_group:
-        await message.answer_media_group(media=media_group)
-
+    if media_group: await message.answer_media_group(media=media_group)
     return text_parts
-
 
 def assemble_image_from_zip_bytes(zip_bytes, name):
     scale_factor = 1.275
-    positions_map = {
-        'hud_back.png': (450, 240),
-        'hud_up.png': (40, 150),
-        'hud_center.png': (40, 290),
-        'hud_down.png': (40, 490),
-        'hud_menu.png': (40, 770),
-        'hud_donat_store.png': (520, 770)
-    }
-    output_size = (1000, 1000)
-    assembled_img = Image.new('RGBA', output_size, (0, 0, 0, 0))
+    positions_map = {'hud_back.png':(450,240),'hud_up.png':(40,150),'hud_center.png':(40,290),
+                     'hud_down.png':(40,490),'hud_menu.png':(40,770),'hud_donat_store.png':(520,770)}
+    assembled_img = Image.new('RGBA', (1000, 1000), (0, 0, 0, 0))
     with zipfile.ZipFile(zip_bytes, 'r') as zip_file:
         for filename in zip_file.namelist():
             if filename in positions_map:
@@ -956,19 +1080,14 @@ def assemble_image_from_zip_bytes(zip_bytes, name):
                         new_size = (int(img_part.width * scale_factor), int(img_part.height * scale_factor))
                         img_part = img_part.resize(new_size, Image.Resampling.LANCZOS)
                         assembled_img.paste(img_part, pos, img_part)
-                except Exception as e:
-                    print(f"Error processing {filename}: {e}")
+                except: pass
     assembled_img.save(name, format='PNG')
-
 
 def process_image_sync(file):
     img = Image.open(file).convert("RGBA")
     data = np.array(img)
     alpha = data[:, :, 3]
     kernel_disk = disk(2)
-    hist = np.histogram(alpha, bins=256)[0]
-    otsu_thresh = exposure.is_low_contrast(
-        alpha)
     binary = (alpha > 0).astype(np.uint8) * 255
     try:
         thresh_val = threshold_otsu(alpha)
@@ -981,17 +1100,11 @@ def process_image_sync(file):
     labels = label(opened_bool, connectivity=2)
     regions = regionprops(labels)
     objects = []
-    min_pixels = 500
-    padding = 10
     for props in regions:
-        area = props.area
-        if area < min_pixels:
-            continue
+        if props.area < 500: continue
         y1, x1, y2, x2 = props.bbox
-        x1_pad = max(0, x1 - padding)
-        y1_pad = max(0, y1 - padding)
-        x2_pad = min(data.shape[1], x2 + padding)
-        y2_pad = min(data.shape[0], y2 + padding)
+        x1_pad = max(0, x1 - 10); y1_pad = max(0, y1 - 10)
+        x2_pad = min(data.shape[1], x2 + 10); y2_pad = min(data.shape[0], y2 + 10)
         object_img_data = data[y1_pad:y2_pad, x1_pad:x2_pad, :3]
         relative_labels_slice = labels[y1_pad:y2_pad, x1_pad:x2_pad]
         object_mask_bool = (relative_labels_slice == props.label)
@@ -1000,14 +1113,11 @@ def process_image_sync(file):
         object_img = np.zeros((y2_pad - y1_pad, x2_pad - x1_pad, 4), dtype=np.uint8)
         object_img[:, :, :3] = object_img_data
         object_img[:, :, 3] = object_mask
-        objects.append((area, object_img))
+        objects.append((props.area, object_img))
     objects.sort(reverse=True, key=lambda x: x[0])
-    if len(objects) == 6:
-        prefixes = ['hud_back', 'hud_down', 'hud_up', 'hud_center', 'hud_menu', 'hud_donat_store']
-    elif len(objects) == 5:
-        prefixes = ['hud_down', 'hud_up', 'hud_center', 'hud_menu', 'hud_donat_store']
-    else:
-        prefixes = [f'hud_part_{i + 1}' for i in range(len(objects))]
+    if len(objects) == 6: prefixes = ['hud_back', 'hud_down', 'hud_up', 'hud_center', 'hud_menu', 'hud_donat_store']
+    elif len(objects) == 5: prefixes = ['hud_down', 'hud_up', 'hud_center', 'hud_menu', 'hud_donat_store']
+    else: prefixes = [f'hud_part_{i + 1}' for i in range(len(objects))]
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         for i, (_, img_data) in enumerate(objects):
@@ -1019,337 +1129,23 @@ def process_image_sync(file):
     zip_buffer.seek(0)
     return zip_buffer, len(objects)
 
-
 def create_and_zip_files(base_src_path, output_dir, zip_name, file_format, name, file_SUFFIXES):
     zip_path = os.path.join(output_dir, f"{zip_name}_{name}.zip")
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as archive:
         for suffix in file_SUFFIXES:
-            arcname = f"{suffix}.{file_format}"
-            archive.write(base_src_path, arcname)
+            archive.write(base_src_path, f"{suffix}.{file_format}")
     if os.path.getsize(zip_path) >= MAX_FILE_SIZE:
         os.remove(zip_path)
         return False, None
     return True, zip_path
 
-
-def prepare_image(src_path):
-    img = Image.open(src_path)
-    img.close()
-    return True
-
-
-def execute_sql_query(query, params=(), fetchone=False, fetchall=False):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(query, params)
-    if fetchone:
-        result = cursor.fetchone()
-        conn.close()
-        return result
-    if fetchall:
-        result = cursor.fetchall()
-        conn.close()
-        return result
-    conn.commit()
-    conn.close()
-
-
-async def colorcyc(r, b, g):
-    with open('BASEcolorcycle.dat', 'r') as f:
-        template_data = f.read()
-    final_data = template_data.replace("r", r).replace("g", g).replace("b", b)
-    letters = string.ascii_lowercase
-    rand_string = ''.join(random.choice(letters) for _ in range(length))
-    grn1 = f"{rand_string}_colorcycle.dat"
-    with open(grn1, 'w') as f:
-        f.write(final_data)
-    return grn1
-
-
-async def timecyc(j):
-    letters = string.ascii_lowercase
-    rand_string = ''.join(random.choice(letters) for i in range(length))
-    output_file_path = f"{rand_string}_timecyc.json"
-    with open("main.json", "r", encoding='utf-8') as f:
-        timecyc_json_string = f.read()
-    replacements = [
-        ('"SkyBottomRGB":[SBR016]', f'"SkyBottomRGB":{str(list(ImageColor.getrgb(j[1]))).replace(" ","")}'),
-        ('"SkyTopRGB":[STR016]', f'"SkyTopRGB":{str(list(ImageColor.getrgb(j[2]))).replace(" ","")}'),
-        ('"CloudRGB":[CLR016]', f'"CloudRGB":{str(list(ImageColor.getrgb(j[3]))).replace(" ","")}'),
-        ('"SunCoreRGB":[SCR016]', f'"SunCoreRGB":{str(list(ImageColor.getrgb(j[4]))).replace(" ","")}')
-    ]
-    for old_text, new_text in replacements:
-        timecyc_json_string = timecyc_json_string.replace(old_text, new_text)
-    with open(output_file_path, "w", encoding='utf-8') as f:
-        f.write(timecyc_json_string)
-    return output_file_path
-
-
-def _sync_aitimecyc(description: str) -> dict:
-    """Synchronous wrapper to call Groq for timecyc colors."""
-    prompt = f"""Ты эксперт по настройке атмосферы в играх GTA SA. 
-На основе описания "{description}" придумай цветовую схему для timecyc.
-Верни ТОЛЬКО JSON без пояснений:
-{{
-  "SkyBottomRGB": [R, G, B],
-  "SkyTopRGB": [R, G, B],
-  "CloudRGB": [R, G, B],
-  "SunCoreRGB": [R, G, B],
-  "AmbientRGB": [R, G, B],
-  "DirectionalRGB": [R, G, B],
-  "FarClip": 700.0,
-  "FogStart": 100.0
-}}
-Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400."""
-    completion = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": "Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
-            {"role": "user", "content": prompt}
-        ],
-        model="llama-3.1-8b-instant",
-        temperature=0.7,
-    )
-    raw = completion.choices[0].message.content.strip()
-    match = re.search(r'\{[\s\S]*\}', raw)
-    if not match:
-        raise ValueError("AI не вернул валидный JSON")
-    return json.loads(match.group(0))
-
-
-async def aitimecyc(description: str):
-    """Generate timecyc colors via Groq AI based on text description."""
-    prompt = f"""Ты эксперт по настройке атмосферы в играх GTA SA. 
-На основе описания "{description}" придумай цветовую схему для timecyc.
-Верни ТОЛЬКО JSON без пояснений:
-{{
-  "SkyBottomRGB": [R, G, B],
-  "SkyTopRGB": [R, G, B],
-  "CloudRGB": [R, G, B],
-  "SunCoreRGB": [R, G, B],
-  "AmbientRGB": [R, G, B],
-  "DirectionalRGB": [R, G, B],
-  "FarClip": 700.0,
-  "FogStart": 100.0
-}}
-Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400."""
-    completion = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": "Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
-            {"role": "user", "content": prompt}
-        ],
-        model="llama-3.1-8b-instant",
-        temperature=0.7,
-    )
-    raw = completion.choices[0].message.content.strip()
-    match = re.search(r'\{[\s\S]*\}', raw)
-    if not match:
-        raise ValueError("AI не вернул валидный JSON")
-    data = json.loads(match.group(0))
-    return data
-
-
-def generate_aitimecyc_json(ai_colors: dict) -> str:
-    """Build timecyc JSON from AI colors using main.json template."""
-    letters = string.ascii_lowercase
-    rand_string = ''.join(random.choice(letters) for _ in range(length))
-    output_file_path = f"{rand_string}_aitimecyc.json"
-    with open("main.json", "r", encoding='utf-8') as f:
-        timecyc_json_string = f.read()
-    sky_bottom = str(ai_colors["SkyBottomRGB"]).replace(" ", "")
-    sky_top = str(ai_colors["SkyTopRGB"]).replace(" ", "")
-    cloud = str(ai_colors["CloudRGB"]).replace(" ", "")
-    sun_core = str(ai_colors["SunCoreRGB"]).replace(" ", "")
-    replacements = [
-        ('"SkyBottomRGB":[SBR016]', f'"SkyBottomRGB":{sky_bottom}'),
-        ('"SkyTopRGB":[STR016]', f'"SkyTopRGB":{sky_top}'),
-        ('"CloudRGB":[CLR016]', f'"CloudRGB":{cloud}'),
-        ('"SunCoreRGB":[SCR016]', f'"SunCoreRGB":{sun_core}')
-    ]
-    for old_text, new_text in replacements:
-        timecyc_json_string = timecyc_json_string.replace(old_text, new_text)
-    with open(output_file_path, "w", encoding='utf-8') as f:
-        f.write(timecyc_json_string)
-    return output_file_path
-
-
-def generate_sky_preview(ai_colors: dict, description: str) -> str:
-    """Generate a preview image showing sky at noon in sunny weather."""
-    width, height = 800, 450
-    sky_top = tuple(ai_colors["SkyTopRGB"])
-    sky_bottom = tuple(ai_colors["SkyBottomRGB"])
-    cloud_color = tuple(ai_colors["CloudRGB"])
-    sun_color = tuple(ai_colors["SunCoreRGB"])
-
-    img = Image.new("RGB", (width, height))
-    draw = ImageDraw.Draw(img)
-
-    # Sky gradient (top to bottom)
-    for y in range(height):
-        t = y / height
-        r = int(sky_top[0] * (1 - t) + sky_bottom[0] * t)
-        g = int(sky_top[1] * (1 - t) + sky_bottom[1] * t)
-        b = int(sky_top[2] * (1 - t) + sky_bottom[2] * t)
-        draw.line([(0, y), (width, y)], fill=(r, g, b))
-
-    # Sun (noon — top center area)
-    sun_x, sun_y = width // 2, height // 5
-    sun_radius = 55
-    # Sun glow
-    for glow_r in range(sun_radius + 40, sun_radius - 1, -2):
-        alpha_ratio = (glow_r - sun_radius) / 40
-        glow_color = tuple(int(c + (255 - c) * (1 - alpha_ratio) * 0.3) for c in sun_color[:3])
-        draw.ellipse(
-            [sun_x - glow_r, sun_y - glow_r, sun_x + glow_r, sun_y + glow_r],
-            fill=glow_color
-        )
-    draw.ellipse(
-        [sun_x - sun_radius, sun_y - sun_radius, sun_x + sun_radius, sun_y + sun_radius],
-        fill=sun_color
-    )
-
-    # Clouds
-    import random as _rnd
-    _rnd.seed(42)
-    for _ in range(6):
-        cx = _rnd.randint(80, width - 80)
-        cy = _rnd.randint(height // 4, height * 2 // 3)
-        cw = _rnd.randint(80, 180)
-        ch = _rnd.randint(30, 70)
-        cloud_alpha_color = tuple(
-            min(255, int(c + (255 - c) * 0.6)) for c in cloud_color[:3]
-        )
-        draw.ellipse([cx - cw, cy - ch, cx + cw, cy + ch], fill=cloud_alpha_color)
-        draw.ellipse([cx - cw // 2, cy - ch - 20, cx + cw // 2, cy + ch - 10], fill=cloud_alpha_color)
-
-    # Ground strip
-    ground_color = tuple(int(c * 0.4) for c in sky_bottom)
-    draw.rectangle([0, height - 60, width, height], fill=ground_color)
-
-    # Labels
-    try:
-        font = ImageFont.truetype("arial.ttf", 16)
-        font_small = ImageFont.truetype("arial.ttf", 13)
-    except:
-        font = ImageFont.load_default()
-        font_small = font
-
-    draw.text((10, 10), f"🎨 AI TimeCyc Preview — 12:00 ☀️", fill=(255, 255, 255), font=font)
-    draw.text((10, 30), f"Описание: {description[:60]}", fill=(220, 220, 220), font=font_small)
-
-    # Color swatches at bottom
-    colors_info = [
-        ("SkyTop", sky_top),
-        ("SkyBot", sky_bottom),
-        ("Cloud", cloud_color),
-        ("Sun", sun_color),
-    ]
-    sw_x = 10
-    for label, color in colors_info:
-        draw.rectangle([sw_x, height - 55, sw_x + 40, height - 20], fill=color, outline=(255,255,255), width=1)
-        hex_c = '#{:02X}{:02X}{:02X}'.format(*color[:3])
-        draw.text((sw_x, height - 17), f"{label}", fill=(255, 255, 255), font=font_small)
-        sw_x += 95
-
-    rand_str = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
-    out_path = f"{rand_str}_sky_preview.png"
-    img.save(out_path)
-    return out_path
-
-
-    FONT = ImageFont.truetype("arial.ttf", 24)
-    img_width = 400
-    img_height = 500
-    background_color_rgb = (128, 128, 128)
-    image = Image.new("RGB", (img_width, img_height), background_color_rgb)
-    draw = ImageDraw.Draw(image)
-    rect_width = 200
-    rect_height = 200
-    rect_x = (img_width - rect_width) // 2
-    rect_y = 150
-    radius = 20
-    hex_color_val = hex_color.lstrip('#')
-    rgb_color = tuple(int(hex_color_val[i:i + 2], 16) for i in (0, 2, 4))
-    draw.rounded_rectangle([(rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height)], radius, fill=rgb_color,
-                           outline=(0, 0, 0), width=2)
-    text = hex_color
-    text_color = (0, 0, 0) if sum(rgb_color) > 384 else (255, 255, 255)
-    bbox = draw.textbbox((0, 0), text, font=FONT)
-    text_width = bbox[2] - bbox[0]
-    text_x = (img_width - text_width) // 2
-    text_y = rect_y + rect_height + 20
-    draw.text((text_x, text_y), text, font=FONT, fill=text_color)
-    image_path = f"color_image_{hex_color.replace('#', '')}.png"
-    image.save(image_path)
-    return image_path
-
-
-def initialize_database():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            chat_id INTEGER PRIMARY KEY,
-            username TEXT,
-            sub TEXT DEFAULT 'False',
-            admin TEXT DEFAULT 'False',
-            time TEXT -- Дата хранится в формате ISO string (YYYY-MM-DD)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-
-initialize_database()
-
-
-async def save_workbook_to_disk():
-    print(f"Изменения в БД сохранены.")
-
-
-async def update(chat_id, username):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    current_date = datetime.datetime.now().date()
-    message_to_send = None
-    sub = False
-    cursor.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,))
-    user = cursor.fetchone()
-
-    if user:
-        db_chat_id, db_username, db_sub_status, db_admin_status, db_expiration_date_str = user
-        if db_expiration_date_str:
-            expiration_date = datetime.datetime.strptime(db_expiration_date_str, "%d.%m.%Y").date()
-            if expiration_date <= current_date:
-                sub = True
-                cursor.execute("UPDATE users SET sub='False', time=NULL WHERE chat_id=?", (chat_id,))
-                message_to_send = "Ваша подписка закончилась!"
-        if db_username != username:
-            cursor.execute("UPDATE users SET username=? WHERE chat_id=?", (username, chat_id))
-
-    else:
-        new_user_data = (chat_id, username, "False", "False", None)
-        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?)", new_user_data)
-        message_to_send = "Вы были успешно добавлены в базу данных!"
-    conn.commit()
-    conn.close()
-    await save_workbook_to_disk()
-    return sub, message_to_send
-
-
 def recolor_image_optimized_sync(image_path_or_bytes, hex_color, alpha=1.0):
-    if not (0.0 <= alpha <= 1.0):
-        alpha = 1.0
-    try:
-        new_color_np = np.array(mcolors.to_rgb(hex_color), dtype=np.float32)
-    except ValueError:
-        logging.warning(f"Invalid hex color: {hex_color}. Using default white.")
-        new_color_np = np.array([1.0, 1.0, 1.0], dtype=np.float32)
-    if isinstance(image_path_or_bytes, bytes):
-        img = Image.open(io.BytesIO(image_path_or_bytes))
-    else:
-        img = Image.open(image_path_or_bytes)
-    if img.mode != 'RGBA':
-        img = img.convert('RGBA')
+    if not (0.0 <= alpha <= 1.0): alpha = 1.0
+    try: new_color_np = np.array(mcolors.to_rgb(hex_color), dtype=np.float32)
+    except ValueError: new_color_np = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+    if isinstance(image_path_or_bytes, bytes): img = Image.open(io.BytesIO(image_path_or_bytes))
+    else: img = Image.open(image_path_or_bytes)
+    if img.mode != 'RGBA': img = img.convert('RGBA')
     img_np = np.array(img, dtype=np.float32) / 255.0
     rgb_channels = img_np[:, :, :3]
     original_alpha_channel = img_np[:, :, 3:4]
@@ -1363,46 +1159,32 @@ def recolor_image_optimized_sync(image_path_or_bytes, hex_color, alpha=1.0):
     new_img.save(buffer, format="PNG")
     return buffer.getvalue()
 
-
-def sync_process_file_task_optimized(file_path: Path, color_hex, alpha):
+def sync_process_file_task_optimized(file_path, color_hex, alpha):
     image_bytes = recolor_image_optimized_sync(str(file_path), color_hex, alpha)
-    arcname = file_path.name
-    return image_bytes, arcname
+    return image_bytes, file_path.name
 
-
-async def color(color_hex, src_zip_path: Path, original_zip_name: str, alpha=1.0):
+async def color(color_hex, src_zip_path, original_zip_name: str, alpha=1.0):
     r = generate_random_string(length)
     work_dir = Path(f'work/work_HUD/{r}')
     await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
     await asyncio.to_thread(zipfile.ZipFile(src_zip_path, 'r').extractall, work_dir)
-    files_to_process = []
-    for file in work_dir.glob('*'):
-        if file.is_file() and file.suffix.lower() in ['.jpg', '.jpeg', '.png']:
-            files_to_process.append(file)
-    tasks = [asyncio.to_thread(sync_process_file_task_optimized, file, color_hex, alpha)
-             for file in files_to_process]
+    files_to_process = [f for f in work_dir.glob('*') if f.is_file() and f.suffix.lower() in ['.jpg', '.jpeg', '.png']]
+    tasks = [asyncio.to_thread(sync_process_file_task_optimized, f, color_hex, alpha) for f in files_to_process]
     processed_files_info = await asyncio.gather(*tasks)
     output_zip_dir = Path(f'work/work_HUD/{r}')
     await asyncio.to_thread(os.makedirs, output_zip_dir, exist_ok=True)
     output_zip_path = output_zip_dir / f'{original_zip_name}_{r}.zip'
     with zipfile.ZipFile(output_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as f:
-        for image_bytes, arcname in processed_files_info:
-            f.writestr(arcname, image_bytes)
+        for image_bytes, arcname in processed_files_info: f.writestr(arcname, image_bytes)
     return output_zip_dir, output_zip_path
 
-
 def _process_image_bytes(image_bytes, color_hex, alpha):
-    if not (0.0 <= alpha <= 1.0):
-        alpha = 1.0
+    if not (0.0 <= alpha <= 1.0): alpha = 1.0
+    try: new_color_np = np.array(mcolors.to_rgb(color_hex), dtype=np.float32)
+    except ValueError: new_color_np = np.array([1.0, 1.0, 1.0], dtype=np.float32)
     try:
-        new_color_np = np.array(mcolors.to_rgb(color_hex), dtype=np.float32)
-    except ValueError:
-        logging.warning(f"Invalid hex color: {color_hex}. Using default white.")
-        new_color_np = np.array([1.0, 1.0, 1.0], dtype=np.float32)
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        if img.mode != 'RGBA':
-            img = img.convert('RGBA')
+        img = Image.open(io.BytesIO(image_bytes) if isinstance(image_bytes, bytes) else image_bytes)
+        if img.mode != 'RGBA': img = img.convert('RGBA')
         img_np = np.array(img, dtype=np.float32) / 255.0
         rgb_channels = img_np[:, :, :3]
         original_alpha_channel = img_np[:, :, 3:4]
@@ -1419,7 +1201,6 @@ def _process_image_bytes(image_bytes, color_hex, alpha):
         logging.error(f"Error processing image: {e}")
         return None
 
-
 async def color_optimized(color_hex, src_zip_path, original_zip_name: str, alpha=1.0):
     r = generate_random_string(4)
     files_to_process = []
@@ -1429,35 +1210,19 @@ async def color_optimized(color_hex, src_zip_path, original_zip_name: str, alpha
                 files_to_process.append((zip_info.filename, src_zip.read(zip_info.filename)))
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor() as executor:
-        tasks = [
-            loop.run_in_executor(executor, _process_image_bytes, img, color_hex, alpha)
-            for filename, img in files_to_process
-        ]
+        tasks = [loop.run_in_executor(executor, _process_image_bytes, img, color_hex, alpha) for filename, img in files_to_process]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        processed_files_info = []
-        for (filename, _), res in zip(files_to_process, results):
-            if isinstance(res, Exception) or res is None:
-                logging.warning(f"Ошибка в файле {filename}: {res}")
-                continue
-            processed_files_info.append((res, filename))
+    processed_files_info = [(res, fn) for (fn, _), res in zip(files_to_process, results) if not isinstance(res, Exception) and res is not None]
     output_zip_dir = Path(f'work/work_HUD/{r}')
-    work_dir = Path(f'work/work_HUD/{r}')
     await asyncio.to_thread(os.makedirs, output_zip_dir, exist_ok=True)
     output_zip_path = output_zip_dir / f'{original_zip_name}_{r}.zip'
     with zipfile.ZipFile(output_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as f:
-        for image_bytes, arcname in processed_files_info:
-            f.writestr(arcname, image_bytes)
-    logging.info(f"Created output zip: {output_zip_path}")
+        for image_bytes, arcname in processed_files_info: f.writestr(arcname, image_bytes)
     return output_zip_dir, output_zip_path
 
-
 def is_float(s):
-    try:
-        float(s)
-        return True
-    except ValueError:
-        return False
-
+    try: float(s); return True
+    except ValueError: return False
 
 async def setup_work_dirs():
     work_dirs = ['work/', 'work/work_MAP/', 'work/work_BILD/', 'work/work_BLOOD/',
@@ -1465,211 +1230,64 @@ async def setup_work_dirs():
                  'work/work_BTX/', 'work/work_TXD/', 'work/work_BPC/',
                  'work/work_HUD/', 'work/work_ANI/', 'work/work_COMPRESS', 'work/work_COL', 'work/work_MOD',
                  'work/work_Z2N', "work/work_OVERLAY", "work/work_weapons"]
-    for d in work_dirs:
-        os.makedirs(d, exist_ok=True)
+    for d in work_dirs: os.makedirs(d, exist_ok=True)
 
-
-def generate_random_string(length):
-    letters = string.ascii_lowercase
-    return ''.join(random.choice(letters) for _ in range(length))
-
+def generate_random_string(length=4):
+    return ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(length))
 
 def parse_caption(caption):
     parts = caption.split()
-    if '/color' not in parts:
-        return None, None, None
+    if '/color' not in parts: return None, None, None
     try:
         hex_color = parts[1]
-        if not hex_color.startswith('#'):
-            hex_color = '#' + hex_color
-    except IndexError:
-        return None, None, None
+        if not hex_color.startswith('#'): hex_color = '#' + hex_color
+    except IndexError: return None, None, None
     alpha = 1.0
     try:
-        if len(parts) > 2:
-            alpha = float(parts[2])
-    except ValueError:
-        pass
+        if len(parts) > 2: alpha = float(parts[2])
+    except ValueError: pass
     return hex_color, alpha
-
 
 def parse_text(text):
     parts = text.split()
-    if '/color' not in parts:
-        return None, None
+    if '/color' not in parts: return None, None
     try:
         hex_color = parts[1]
-        if not hex_color.startswith('#'):
-            hex_color = '#' + hex_color
-    except IndexError:
-        return None, None
+        if not hex_color.startswith('#'): hex_color = '#' + hex_color
+    except IndexError: return None, None
     alpha = 1.0
     try:
-        if len(parts) > 2:
-            alpha = float(parts[2])
-    except ValueError:
-        pass
+        if len(parts) > 2: alpha = float(parts[2])
+    except ValueError: pass
     return hex_color, alpha
-
 
 def parse_quality(text):
     parts = text.split()
-    if '/quality' not in parts:
-        return None
-    try:
-        qua = parts[1]
-    except IndexError:
-        return None
-    return qua
-
+    if '/quality' not in parts: return None
+    try: return parts[1]
+    except IndexError: return None
 
 def parse_filter(caption):
     parts = caption.split()
-    if '/filters' not in parts:
-        return None, None
-    try:
-        filter = parts[1]
-    except IndexError:
-        return None, None, None
+    if '/filters' not in parts: return None, None
+    try: filter_name = parts[1]
+    except IndexError: return None, None
     colvo = 50
     try:
-        if len(parts) > 2:
-            colvo = int(parts[2])
-    except ValueError:
-        pass
-    return filter, colvo
-
-
-def find_user_data_in_sql(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT sub, time FROM users WHERE chat_id=?", (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    if result:
-        db_sub_status_str, db_expiration_date_str = result
-        is_subscribed = db_sub_status_str == 'True'
-        return is_subscribed, db_expiration_date_str
-    else:
-        return False, None
-
-
-async def get_user_status_async(user_id):
-    return await asyncio.to_thread(find_user_data_in_sql, user_id)
-
-
-def apply_filter_on_bytes_optimized(image_bytes: bytes, filter_name: str, colvo):
-    img_pil = Image.open(image_bytes)
-    if img_pil.mode != 'RGBA':
-        img_pil = img_pil.convert('RGBA')
-    img_arr = np.array(img_pil)
-    rgb_channels = img_arr[:, :, :3]
-    alpha_channel = img_arr[:, :, 3]
-    filtered_rgb = None
-    filter_name = filter_name.lower()
-    enhancement_factor = 1.5
-    if filter_name == 'red':
-        temp_r = rgb_channels[:, :, 0].astype(np.uint16) * enhancement_factor
-        rgb_channels[:, :, 0] = np.clip(temp_r, 0, 255).astype(np.uint8)
-        filtered_rgb = rgb_channels
-    elif filter_name == 'green':
-        temp_g = rgb_channels[:, :, 1].astype(np.uint16) * enhancement_factor
-        rgb_channels[:, :, 1] = np.clip(temp_g, 0, 255).astype(np.uint8)
-        filtered_rgb = rgb_channels
-    elif filter_name == 'blue':
-        temp_b = rgb_channels[:, :, 2].astype(np.uint16) * enhancement_factor
-        rgb_channels[:, :, 2] = np.clip(temp_b, 0, 255).astype(np.uint8)
-        filtered_rgb = rgb_channels
-    elif filter_name == 'grayscale':
-        grayscale_2d = np.dot(rgb_channels[..., :3], [0.2989, 0.5870, 0.1140])
-        filtered_rgb = np.repeat(grayscale_2d[:, :, np.newaxis], 3, axis=2)
-        filtered_rgb = np.clip(filtered_rgb, 0, 255).astype(np.uint8)
-    elif filter_name == 'negate':
-        filtered_rgb = 255 - rgb_channels
-    elif filter_name == 'sepia':
-        sepia_matrix = np.array([[0.272, 0.534, 0.131], [0.349, 0.686, 0.168], [0.393, 0.769, 0.189]]).T
-        rgb_float = rgb_channels.astype(np.float32) / 255.0
-        filtered_rgb_float = np.dot(rgb_float, sepia_matrix.T)  # Note the transpose change due to numpy stacking
-        filtered_rgb = np.clip(filtered_rgb_float * 255.0, 0, 255).astype(np.uint8)
-    elif filter_name == 'solarize':
-        threshold = 128
-        mask = rgb_channels > threshold
-        filtered_rgb = rgb_channels.copy()
-        filtered_rgb[mask] = 255 - filtered_rgb[mask]
-    elif filter_name == 'light':
-        filtered_rgb = np.clip(rgb_channels.astype(np.int16) + colvo, 0, 255).astype(np.uint8)
-
-    elif filter_name == 'saturation':
-        from matplotlib.colors import rgb_to_hsv, hsv_to_rgb
-        hsv = rgb_to_hsv(rgb_channels / 255.0)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1 + colvo / 100.0), 0, 1)
-        filtered_rgb = (hsv_to_rgb(hsv) * 255).astype(np.uint8)
-
-    elif filter_name == 'contrast':
-        factor = (259 * (colvo + 255)) / (255 * (259 - colvo))
-        filtered_rgb = np.clip(factor * (rgb_channels.astype(np.float32) - 128) + 128, 0, 255).astype(np.uint8)
-
-    elif filter_name == 'clarity':
-        blurred = gaussian_filter(rgb_channels.astype(np.float32), sigma=1, axes=(0, 1))
-        sharpened = rgb_channels + (rgb_channels - blurred) * (colvo / 50.0)
-        filtered_rgb = np.clip(sharpened, 0, 255).astype(np.uint8)
-    else:
-        raise ValueError(f"Неизвестный или неподдерживаемый фильтр: '{filter_name}'")
-    final_img_arr = np.dstack([
-        filtered_rgb,
-        alpha_channel
-    ])
-    final_img_pil = Image.fromarray(final_img_arr, 'RGBA')
-    with io.BytesIO() as img_buffer:
-        final_img_pil.save(img_buffer, format='PNG')
-        return img_buffer.getvalue()
-
-
-def sync_process_file_filter_task(file_path: Path, filter_name: str):
-    with open(file_path, 'rb') as f:
-        image_bytes_original = f.read()
-    image_bytes_processed = apply_filter_on_bytes_optimized(image_bytes_original, filter_name)
-    arcname = file_path.name
-    return image_bytes_processed, arcname
-
-
-async def filter_zip(filter_name: str, src_zip_path: Path, original_zip_name: str):
-    r = generate_random_string(length)
-    work_dir = Path(f'work/work_filter_{r}')
-    await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
-    await asyncio.to_thread(zipfile.ZipFile(src_zip_path, 'r').extractall, work_dir)
-    files_to_process = []
-    for file in work_dir.glob('*'):
-        if file.is_file() and file.suffix.lower() in ['.jpg', '.jpeg', '.png']:
-            files_to_process.append(file)
-    tasks = [
-        asyncio.to_thread(sync_process_file_filter_task, file, filter_name)
-        for file in files_to_process
-    ]
-    processed_files_info = await asyncio.gather(*tasks)
-    output_zip_dir = Path(f'work/output_zips/')
-    await asyncio.to_thread(os.makedirs, output_zip_dir, exist_ok=True)
-    output_zip_path = output_zip_dir / f'{original_zip_name}_filtered_{filter_name}_{r}.zip'
-    with zipfile.ZipFile(output_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as f:
-        for image_bytes, arcname in processed_files_info:
-            f.writestr(arcname, image_bytes)
-    await asyncio.to_thread(shutil.rmtree, work_dir)
-    return output_zip_path
-
+        if len(parts) > 2: colvo = int(parts[2])
+    except ValueError: pass
+    return filter_name, colvo
 
 def hex_to_rgb(hex_color):
     hex_color = hex_color.lstrip('#')
-    if len(hex_color) != 6:
-        raise ValueError("Неверный формат шестнадцатеричного цвета")
+    if len(hex_color) != 6: raise ValueError("Неверный формат шестнадцатеричного цвета")
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
-
 
 def _apply_recolor_to_bytes(image_bytes, target_hex_color, replacement_hex_color, tolerance=10):
     try:
         target_rgb_tuple = hex_to_rgb(target_hex_color)
-        img = Image.open(image_bytes)
-        if img.mode != 'RGBA':
-            img = img.convert('RGBA')
+        img = Image.open(image_bytes if isinstance(image_bytes, io.BytesIO) else io.BytesIO(image_bytes) if isinstance(image_bytes, bytes) else image_bytes)
+        if img.mode != 'RGBA': img = img.convert('RGBA')
         img_np = np.array(img, dtype=np.uint8)
         rgb_channels = img_np[:, :, :3]
         alpha_channel = img_np[:, :, 3]
@@ -1686,40 +1304,27 @@ def _apply_recolor_to_bytes(image_bytes, target_hex_color, replacement_hex_color
         buffer = io.BytesIO()
         new_img.save(buffer, format="PNG")
         return buffer.getvalue()
-    except ValueError as ve:
-        logging.error(f"Ошибка параметров цвета: {ve}")
-        return None
     except Exception as e:
         logging.error(f"Ошибка обработки изображения: {e}")
         return None
 
-
 def parse_recolor_command(caption):
     parts = caption.split()
-    if len(parts) < 3 or len(parts) > 4:
-        return None
+    if len(parts) < 3 or len(parts) > 4: return None
     target_hex = parts[1]
     replacement_hex = parts[2]
     tolerance = 10
     if len(parts) == 4:
         try:
             tolerance = int(parts[3])
-            if not (0 <= tolerance <= 255):
-                logging.warning("Допуск вне диапазона [0, 255]")
-                return None
-        except ValueError:
-            logging.warning("Неверный формат допуска (должно быть целое число)")
-            return None
-    if not (target_hex.startswith('#') and len(target_hex) == 7):
-        logging.warning("Неверный формат hex-цвета (ожидается #RRGGBB)")
-        return None
+            if not (0 <= tolerance <= 255): return None
+        except ValueError: return None
+    if not (target_hex.startswith('#') and len(target_hex) == 7): return None
     return target_hex, replacement_hex, tolerance
-
 
 def process_aim_image_optimized(image_bytes):
     img = Image.open(image_bytes)
-    if img.mode != 'RGBA':
-        img = img.convert('RGBA')
+    if img.mode != 'RGBA': img = img.convert('RGBA')
     new_img = Image.new("RGBA", (img.width * 2, img.height * 2))
     new_img.paste(img, (0, 0))
     new_img.paste(img.rotate(90), (0, img.height))
@@ -1730,10 +1335,7 @@ def process_aim_image_optimized(image_bytes):
     buffer.seek(0)
     return buffer.getvalue()
 
-
-async def recolor_zip_optimized(target_hex, replacement_hex, tolerance, src_zip_path: Path):
-    target_rgb_tuple = tuple(int(target_hex.strip('#')[i:i + 2], 16) for i in (0, 2, 4))
-    replacement_rgb_tuple = tuple(int(replacement_hex.strip('#')[i:i + 2], 16) for i in (0, 2, 4))
+async def recolor_zip_optimized(target_hex, replacement_hex, tolerance, src_zip_path):
     files_to_process = []
     with zipfile.ZipFile(src_zip_path, 'r') as src_zip:
         for zip_info in src_zip.infolist():
@@ -1742,103 +1344,74 @@ async def recolor_zip_optimized(target_hex, replacement_hex, tolerance, src_zip_
     loop = asyncio.get_running_loop()
     processed_files_info = []
     with ThreadPoolExecutor() as executor:
-        tasks = [loop.run_in_executor(executor, _apply_recolor_to_bytes, image_bytes, target_rgb_tuple,
-                                      replacement_rgb_tuple, tolerance)
-                 for filename, image_bytes in files_to_process]
+        tasks = [loop.run_in_executor(executor, _apply_recolor_to_bytes, image_bytes, target_hex, replacement_hex, tolerance) for filename, image_bytes in files_to_process]
         results = await asyncio.gather(*tasks)
         for i, result_bytes in enumerate(results):
-            if result_bytes is not None:
-                processed_files_info.append((result_bytes, files_to_process[i][0]))
+            if result_bytes is not None: processed_files_info.append((result_bytes, files_to_process[i][0]))
     buffer_out = io.BytesIO()
     with zipfile.ZipFile(buffer_out, 'w', compression=zipfile.ZIP_DEFLATED) as f_out:
-        for image_bytes_result, arcname in processed_files_info:
-            f_out.writestr(arcname, image_bytes_result)
+        for image_bytes_result, arcname in processed_files_info: f_out.writestr(arcname, image_bytes_result)
     buffer_out.seek(0)
     return buffer_out.getvalue()
 
-
-def quality_func(image_bytes: bytes, level):
+def quality_func(image_bytes, level):
     level = int(level)
     image = Image.open(image_bytes)
-    if image.mode != 'RGBA':
-        image = image.convert('RGBA')
-    for _ in range(max(1, int(level / 10))):
-        image = image.filter(ImageFilter.MedianFilter(size=3))
-    size_increase_factor = 1.5
-    new_size = (int(image.width * size_increase_factor), int(image.height * size_increase_factor))
+    if image.mode != 'RGBA': image = image.convert('RGBA')
+    for _ in range(max(1, int(level / 10))): image = image.filter(ImageFilter.MedianFilter(size=3))
+    new_size = (int(image.width * 1.5), int(image.height * 1.5))
     image = image.resize(new_size, Image.LANCZOS)
-    for _ in range(2):
-        image = image.filter(ImageFilter.SMOOTH)
+    for _ in range(2): image = image.filter(ImageFilter.SMOOTH)
     image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150 + level, threshold=3))
-    contrast_enhancer = ImageEnhance.Contrast(image)
-    image = contrast_enhancer.enhance(1.1 + (level * 0.005))
+    image = ImageEnhance.Contrast(image).enhance(1.1 + (level * 0.005))
     output_buffer = io.BytesIO()
     image.save(output_buffer, format='PNG', optimize=True)
     return output_buffer.getvalue()
 
-
-async def quality_zip(level, src_zip_path: Path):
+async def quality_zip(level, src_zip_path):
     files_to_process = []
     with zipfile.ZipFile(src_zip_path, 'r') as src_zip:
         for zip_info in src_zip.infolist():
             if not zip_info.is_dir() and zip_info.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
                 files_to_process.append((zip_info.filename, src_zip.read(zip_info.filename)))
     loop = asyncio.get_running_loop()
-    processed_files_info = []
     with ThreadPoolExecutor() as executor:
-        tasks = [loop.run_in_executor(executor, quality_func, image_bytes, level)
-                 for filename, image_bytes in files_to_process]
+        tasks = [loop.run_in_executor(executor, quality_func, image_bytes, level) for filename, image_bytes in files_to_process]
         results = await asyncio.gather(*tasks)
-        for i, result_bytes in enumerate(results):
-            if result_bytes is not None:
-                processed_files_info.append((result_bytes, files_to_process[i][0]))
     buffer_out = io.BytesIO()
     with zipfile.ZipFile(buffer_out, 'w', compression=zipfile.ZIP_DEFLATED) as f_out:
-        for image_bytes_result, arcname in processed_files_info:
-            f_out.writestr(arcname, image_bytes_result)
+        for i, result_bytes in enumerate(results):
+            if result_bytes is not None: f_out.writestr(files_to_process[i][0], result_bytes)
     buffer_out.seek(0)
     return buffer_out.getvalue()
 
-
-def generate_random_string(length=4):
-    return ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(length))
-
-
-def parse_caption_for_compression(caption: str) -> tuple[int, int]:
+def parse_caption_for_compression(caption):
     try:
         parts = caption.split()
         size_str = next((p for p in parts if 'x' in p), None)
-        if not size_str:
-            return None, None
+        if not size_str: return None, None
         width, height = map(int, size_str.split('x'))
         return width, height
-    except ValueError:
-        return None, None
+    except ValueError: return None, None
 
-
-def _compress_image_bytes_sync(image_bytes: bytes, target_size: tuple[int, int], original_format: str) -> tuple[
-    bytes, str]:
+def _compress_image_bytes_sync(image_bytes, target_size, original_format):
     try:
         with Image.open(image_bytes) as img:
             img = img.resize(target_size, Image.Resampling.LANCZOS)
             output_buffer = io.BytesIO()
-
             if original_format.lower() == 'png' and img.mode in ('RGBA', 'P'):
                 img.save(output_buffer, format='PNG', optimize=True)
                 return output_buffer.getvalue(), 'png'
             else:
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
+                if img.mode != 'RGB': img = img.convert('RGB')
                 img.save(output_buffer, format='JPEG', optimize=True, quality=85)
                 return output_buffer.getvalue(), 'jpg'
     except Exception as e:
         print(f"Error during image processing: {e}")
         return b"", ""
 
-
-def _process_zip_sync(download_path: Path, output_zip_path: Path, target_size: tuple[int, int]):
-    with open(download_path, 'rb') as f:
-        input_zip_bytes = f.read()
+def _process_zip_sync(download_path, output_zip_path, target_size):
+    with open(download_path, 'rb') as f: input_zip_bytes = f.read()
     output_zip_buffer = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(input_zip_bytes), 'r') as input_zip:
         with zipfile.ZipFile(output_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as output_zip:
@@ -1848,1822 +1421,1795 @@ def _process_zip_sync(download_path: Path, output_zip_path: Path, target_size: t
                     try:
                         image_bytes = input_zip.read(filename)
                         processed_bytes, new_format = _compress_image_bytes_sync(image_bytes, target_size, file_format)
-                        new_filename = Path(filename).stem + f'.{new_format}'
-                        output_zip.writestr(new_filename, processed_bytes)
-                    except Exception as e:
-                        print(f"Could not process {filename}: {e}")
-                        output_zip.writestr(filename, image_bytes)
-                else:
-                    output_zip.writestr(filename, input_zip.read(filename))
+                        output_zip.writestr(Path(filename).stem + f'.{new_format}', processed_bytes)
+                    except: output_zip.writestr(filename, input_zip.read(filename))
+                else: output_zip.writestr(filename, input_zip.read(filename))
+    with open(output_zip_path, 'wb') as f: f.write(output_zip_buffer.getvalue())
 
-    with open(output_zip_path, 'wb') as f:
-        f.write(output_zip_buffer.getvalue())
+def apply_filter_on_bytes_optimized(image_bytes, filter_name, colvo=50):
+    img_pil = Image.open(image_bytes if isinstance(image_bytes, io.BytesIO) else io.BytesIO(image_bytes) if isinstance(image_bytes, bytes) else image_bytes)
+    if img_pil.mode != 'RGBA': img_pil = img_pil.convert('RGBA')
+    img_arr = np.array(img_pil)
+    rgb_channels = img_arr[:, :, :3]
+    alpha_channel = img_arr[:, :, 3]
+    filter_name = filter_name.lower()
+    enhancement_factor = 1.5
+    if filter_name == 'red':
+        rgb_channels[:, :, 0] = np.clip(rgb_channels[:, :, 0].astype(np.uint16) * enhancement_factor, 0, 255).astype(np.uint8)
+        filtered_rgb = rgb_channels
+    elif filter_name == 'green':
+        rgb_channels[:, :, 1] = np.clip(rgb_channels[:, :, 1].astype(np.uint16) * enhancement_factor, 0, 255).astype(np.uint8)
+        filtered_rgb = rgb_channels
+    elif filter_name == 'blue':
+        rgb_channels[:, :, 2] = np.clip(rgb_channels[:, :, 2].astype(np.uint16) * enhancement_factor, 0, 255).astype(np.uint8)
+        filtered_rgb = rgb_channels
+    elif filter_name == 'grayscale':
+        grayscale_2d = np.dot(rgb_channels[..., :3], [0.2989, 0.5870, 0.1140])
+        filtered_rgb = np.clip(np.repeat(grayscale_2d[:, :, np.newaxis], 3, axis=2), 0, 255).astype(np.uint8)
+    elif filter_name == 'negate': filtered_rgb = 255 - rgb_channels
+    elif filter_name == 'sepia':
+        sepia_matrix = np.array([[0.272,0.534,0.131],[0.349,0.686,0.168],[0.393,0.769,0.189]]).T
+        filtered_rgb = np.clip(np.dot(rgb_channels.astype(np.float32)/255.0, sepia_matrix.T)*255.0, 0, 255).astype(np.uint8)
+    elif filter_name == 'solarize':
+        filtered_rgb = rgb_channels.copy()
+        filtered_rgb[rgb_channels > 128] = 255 - filtered_rgb[rgb_channels > 128]
+    elif filter_name == 'light': filtered_rgb = np.clip(rgb_channels.astype(np.int16) + colvo, 0, 255).astype(np.uint8)
+    elif filter_name == 'saturation':
+        from matplotlib.colors import rgb_to_hsv, hsv_to_rgb
+        hsv = rgb_to_hsv(rgb_channels / 255.0)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1 + colvo / 100.0), 0, 1)
+        filtered_rgb = (hsv_to_rgb(hsv) * 255).astype(np.uint8)
+    elif filter_name == 'contrast':
+        factor = (259 * (colvo + 255)) / (255 * (259 - colvo))
+        filtered_rgb = np.clip(factor * (rgb_channels.astype(np.float32) - 128) + 128, 0, 255).astype(np.uint8)
+    elif filter_name == 'clarity':
+        from scipy.ndimage import gaussian_filter
+        blurred = gaussian_filter(rgb_channels.astype(np.float32), sigma=1, axes=(0, 1))
+        filtered_rgb = np.clip(rgb_channels + (rgb_channels - blurred) * (colvo / 50.0), 0, 255).astype(np.uint8)
+    else: raise ValueError(f"Неизвестный фильтр: '{filter_name}'")
+    final_img_pil = Image.fromarray(np.dstack([filtered_rgb, alpha_channel]), 'RGBA')
+    with io.BytesIO() as buf:
+        final_img_pil.save(buf, format='PNG')
+        return buf.getvalue()
 
+async def filter_zip(filter_name, src_zip_path, original_zip_name):
+    r = generate_random_string(length)
+    work_dir = Path(f'work/work_filter_{r}')
+    await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
+    await asyncio.to_thread(zipfile.ZipFile(src_zip_path, 'r').extractall, work_dir)
+    files_to_process = [f for f in work_dir.glob('*') if f.is_file() and f.suffix.lower() in ['.jpg', '.jpeg', '.png']]
+    def sync_task(file_path, fn):
+        with open(file_path, 'rb') as f: image_bytes = f.read()
+        return apply_filter_on_bytes_optimized(image_bytes, fn), file_path.name
+    tasks = [asyncio.to_thread(sync_task, f, filter_name) for f in files_to_process]
+    processed_files_info = await asyncio.gather(*tasks)
+    output_zip_dir = Path(f'work/output_zips/')
+    await asyncio.to_thread(os.makedirs, output_zip_dir, exist_ok=True)
+    output_zip_path = output_zip_dir / f'{original_zip_name}_filtered_{filter_name}_{r}.zip'
+    with zipfile.ZipFile(output_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as f:
+        for image_bytes, arcname in processed_files_info: f.writestr(arcname, image_bytes)
+    await asyncio.to_thread(shutil.rmtree, work_dir)
+    return output_zip_path
 
+async def colorcyc(r, b, g):
+    with open('BASEcolorcycle.dat', 'r') as f: template_data = f.read()
+    final_data = template_data.replace("r", r).replace("g", g).replace("b", b)
+    rand_string = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+    grn1 = f"{rand_string}_colorcycle.dat"
+    with open(grn1, 'w') as f: f.write(final_data)
+    return grn1
+
+async def timecyc(j):
+    rand_string = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+    output_file_path = f"{rand_string}_timecyc.json"
+    with open("main.json", "r", encoding='utf-8') as f: timecyc_json_string = f.read()
+    replacements = [
+        ('"SkyBottomRGB":[SBR016]', f'"SkyBottomRGB":{str(list(ImageColor.getrgb(j[1]))).replace(" ","")}'),
+        ('"SkyTopRGB":[STR016]', f'"SkyTopRGB":{str(list(ImageColor.getrgb(j[2]))).replace(" ","")}'),
+        ('"CloudRGB":[CLR016]', f'"CloudRGB":{str(list(ImageColor.getrgb(j[3]))).replace(" ","")}'),
+        ('"SunCoreRGB":[SCR016]', f'"SunCoreRGB":{str(list(ImageColor.getrgb(j[4]))).replace(" ","")}'),
+    ]
+    for old_text, new_text in replacements: timecyc_json_string = timecyc_json_string.replace(old_text, new_text)
+    with open(output_file_path, "w", encoding='utf-8') as f: f.write(timecyc_json_string)
+    return output_file_path
+
+def _sync_aitimecyc(description: str) -> dict:
+    prompt = f"""Ты эксперт по настройке атмосферы в играх GTA SA.
+На основе описания "{description}" придумай цветовую схему для timecyc.
+Верни ТОЛЬКО JSON без пояснений:
+{{"SkyBottomRGB":[R,G,B],"SkyTopRGB":[R,G,B],"CloudRGB":[R,G,B],"SunCoreRGB":[R,G,B],"AmbientRGB":[R,G,B],"DirectionalRGB":[R,G,B],"FarClip":700.0,"FogStart":100.0}}
+Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400."""
+    completion = client.chat.completions.create(
+        messages=[{"role":"system","content":"Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
+                  {"role":"user","content":prompt}],
+        model="llama-3.1-8b-instant", temperature=0.7)
+    raw = completion.choices[0].message.content.strip()
+    match = re.search(r'\{[\s\S]*\}', raw)
+    if not match: raise ValueError("AI не вернул валидный JSON")
+    return json.loads(match.group(0))
+
+def generate_aitimecyc_json(ai_colors: dict) -> str:
+    rand_string = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+    output_file_path = f"{rand_string}_aitimecyc.json"
+    with open("main.json", "r", encoding='utf-8') as f: timecyc_json_string = f.read()
+    replacements = [
+        ('"SkyBottomRGB":[SBR016]', f'"SkyBottomRGB":{str(ai_colors["SkyBottomRGB"]).replace(" ","")}'),
+        ('"SkyTopRGB":[STR016]', f'"SkyTopRGB":{str(ai_colors["SkyTopRGB"]).replace(" ","")}'),
+        ('"CloudRGB":[CLR016]', f'"CloudRGB":{str(ai_colors["CloudRGB"]).replace(" ","")}'),
+        ('"SunCoreRGB":[SCR016]', f'"SunCoreRGB":{str(ai_colors["SunCoreRGB"]).replace(" ","")}'),
+    ]
+    for old_text, new_text in replacements: timecyc_json_string = timecyc_json_string.replace(old_text, new_text)
+    with open(output_file_path, "w", encoding='utf-8') as f: f.write(timecyc_json_string)
+    return output_file_path
+
+def generate_sky_preview(ai_colors: dict, description: str) -> str:
+    width, height = 800, 450
+    sky_top = tuple(ai_colors["SkyTopRGB"])
+    sky_bottom = tuple(ai_colors["SkyBottomRGB"])
+    cloud_color = tuple(ai_colors["CloudRGB"])
+    sun_color = tuple(ai_colors["SunCoreRGB"])
+    img = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(img)
+    for y in range(height):
+        t = y / height
+        r = int(sky_top[0] * (1 - t) + sky_bottom[0] * t)
+        g = int(sky_top[1] * (1 - t) + sky_bottom[1] * t)
+        b = int(sky_top[2] * (1 - t) + sky_bottom[2] * t)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+    sun_x, sun_y = width // 2, height // 5
+    sun_radius = 55
+    for glow_r in range(sun_radius + 40, sun_radius - 1, -2):
+        alpha_ratio = (glow_r - sun_radius) / 40
+        glow_color = tuple(int(c + (255 - c) * (1 - alpha_ratio) * 0.3) for c in sun_color[:3])
+        draw.ellipse([sun_x - glow_r, sun_y - glow_r, sun_x + glow_r, sun_y + glow_r], fill=glow_color)
+    draw.ellipse([sun_x - sun_radius, sun_y - sun_radius, sun_x + sun_radius, sun_y + sun_radius], fill=sun_color[:3])
+    for i in range(5):
+        cx = random.randint(50, width - 50)
+        cy = random.randint(int(height * 0.1), int(height * 0.5))
+        for j in range(3):
+            cw = random.randint(60, 120); ch = random.randint(20, 40)
+            draw.ellipse([cx - cw//2 + j*20, cy - ch//2, cx + cw//2 + j*20, cy + ch//2], fill=cloud_color[:3])
+    try: font_small = ImageFont.truetype("arial.ttf", 14)
+    except: font_small = ImageFont.load_default()
+    colors_info = [("SkyTop", sky_top), ("SkyBot", sky_bottom), ("Cloud", cloud_color), ("Sun", sun_color)]
+    sw_x = 10
+    for label_text, color in colors_info:
+        draw.rectangle([sw_x, height - 55, sw_x + 40, height - 20], fill=color, outline=(255,255,255), width=1)
+        draw.text((sw_x, height - 17), label_text, fill=(255, 255, 255), font=font_small)
+        sw_x += 95
+    rand_str = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
+    out_path = f"{rand_str}_sky_preview.png"
+    img.save(out_path)
+    return out_path
+
+async def kvadratik(hex_color):
+    try: FONT = ImageFont.truetype("arial.ttf", 24)
+    except: FONT = ImageFont.load_default()
+    img_width, img_height = 400, 500
+    image = Image.new("RGB", (img_width, img_height), (128, 128, 128))
+    draw = ImageDraw.Draw(image)
+    rect_width, rect_height = 200, 200
+    rect_x = (img_width - rect_width) // 2
+    rect_y = 150
+    hex_color_val = hex_color.lstrip('#')
+    rgb_color = tuple(int(hex_color_val[i:i + 2], 16) for i in (0, 2, 4))
+    draw.rounded_rectangle([(rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height)], 20, fill=rgb_color, outline=(0, 0, 0), width=2)
+    text_color = (0, 0, 0) if sum(rgb_color) > 384 else (255, 255, 255)
+    bbox = draw.textbbox((0, 0), hex_color, font=FONT)
+    text_x = (img_width - (bbox[2] - bbox[0])) // 2
+    draw.text((text_x, rect_y + rect_height + 20), hex_color, font=FONT, fill=text_color)
+    image_path = f"color_image_{hex_color.replace('#', '')}.png"
+    image.save(image_path)
+    return image_path
+
+# ══════════════════════════════════════════════════════════════════════
+# ─── ХЕНДЛЕРЫ ─────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+
+# ── Stars: платёж ─────────────────────────────────────────────────────
+@dp.pre_checkout_query()
+async def pre_checkout(query: types.PreCheckoutQuery):
+    await query.answer(ok=True)
+
+@dp.message(F.successful_payment)
+async def on_payment(message: types.Message):
+    payload = message.successful_payment.invoice_payload
+    row = pop_invoice(payload)
+    if not row:
+        await message.answer("✅ Оплата получена, но возникла ошибка выдачи. Напишите @keedboy016")
+        return
+    user_id, stars, days = row
+    expiry = grant_subscription(user_id, days)
+    plan_label = next((p["label"] for p in SUBSCRIPTION_PLANS if p["stars"] == stars), f"{days} дн.")
+    until_text = "♾️ бессрочно" if days == -1 else f"до <b>{expiry}</b>"
+    await message.answer(
+        f"🎉 <b>Premium активирован!</b>\n\n"
+        f"💎 Тариф: <b>{plan_label}</b>\n"
+        f"📅 Действует: {until_text}\n\n"
+        "Все ограничения сняты. Приятного использования!", parse_mode="HTML")
+
+# ── Callback: купить план ─────────────────────────────────────────────
+@dp.callback_query(F.data.startswith("buy_"))
+async def cb_buy(callback: types.CallbackQuery):
+    stars = int(callback.data.split("_")[1])
+    plan = next((p for p in SUBSCRIPTION_PLANS if p["stars"] == stars), None)
+    if not plan:
+        await callback.answer("Тариф не найден", show_alert=True); return
+    await callback.answer()
+    await send_invoice_for_plan(callback.from_user.id, callback.from_user.id, plan)
+
+# ── Callback: проверить каналы ────────────────────────────────────────
+@dp.callback_query(F.data == "recheck_channels")
+async def cb_recheck(callback: types.CallbackQuery):
+    not_sub = await check_required_subs(callback.from_user.id)
+    if not_sub:
+        await callback.answer("❌ Вы ещё не подписались на все каналы", show_alert=True)
+    else:
+        await callback.message.edit_text(
+            "✅ <b>Подписка подтверждена!</b>\nТеперь вы можете пользоваться ботом. Команды — /help",
+            parse_mode="HTML")
+
+# ── Admin callbacks ───────────────────────────────────────────────────
+@dp.callback_query(F.data == "adm_main")
+async def cb_adm_main(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == 'True'):
+        await callback.answer("❌", show_alert=True); return
+    s = get_bot_stats()
+    text = (f"🛠 <b>Панель администратора</b>\n\n"
+            f"👥 Всего: <b>{s['total']}</b> | 💎 Premium: <b>{s['paid']}</b>\n"
+            f"🆓 Бесплатных: <b>{s['free']}</b> | 🚫 Банов: <b>{s['banned']}</b>\n"
+            f"📅 Активно сегодня: <b>{s['today']}</b>\n"
+            f"💾 Work: <b>{get_work_size_gb():.2f} ГБ</b>")
+    await callback.message.edit_text(text, reply_markup=kb_admin_main(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_stats")
+async def cb_adm_stats(callback: types.CallbackQuery):
+    s = get_bot_stats()
+    top = get_top_users(5)
+    text = (f"📊 <b>Статистика бота</b>\n\n"
+            f"👥 Всего: <b>{s['total']}</b>\n💎 Premium: <b>{s['paid']}</b>\n"
+            f"🆓 Free: <b>{s['free']}</b>\n🚫 Banned: <b>{s['banned']}</b>\n"
+            f"📅 Сегодня активны: <b>{s['today']}</b>\n"
+            f"💾 Work-папка: <b>{get_work_size_gb():.2f} ГБ</b>\n\n🏆 <b>Топ-5:</b>\n")
+    for i, (uid, uname, cnt) in enumerate(top, 1):
+        name = f"@{uname}" if uname else f"ID:{uid}"
+        text += f"{i}. {name} — {cnt}\n"
+    await callback.message.edit_text(text, reply_markup=kb_back_admin(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_top")
+async def cb_adm_top(callback: types.CallbackQuery):
+    rows = get_top_users(15)
+    medals = ["🥇","🥈","🥉"]+["🔸"]*12
+    lines = ["🏆 <b>Топ-15 активных:</b>\n"]
+    for i, (uid, uname, cnt) in enumerate(rows):
+        name = f"@{uname}" if uname else f"ID:{uid}"
+        lines.append(f"{medals[i]} {i+1}. {name} — <b>{cnt}</b>")
+    await callback.message.edit_text("\n".join(lines), reply_markup=kb_back_admin(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_cleanup")
+async def cb_adm_cleanup(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == 'True'):
+        await callback.answer("❌", show_alert=True); return
+    before = get_work_size_gb()
+    await auto_cleanup()
+    after = get_work_size_gb()
+    await callback.answer(f"✅ Очищено {before-after:.2f} ГБ, осталось {after:.2f} ГБ", show_alert=True)
+
+@dp.callback_query(F.data == "adm_bans_list")
+async def cb_adm_bans(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    adm = c.fetchone()
+    if not (adm and adm[0] == 'True'):
+        conn.close(); await callback.answer("❌", show_alert=True); return
+    c.execute("SELECT chat_id, username, ban_reason FROM users WHERE banned='True' LIMIT 20")
+    rows = c.fetchall(); conn.close()
+    if not rows:
+        await callback.message.edit_text("🚫 <b>Нет заблокированных</b>", reply_markup=kb_back_admin(), parse_mode="HTML"); return
+    lines = ["🚫 <b>Заблокированные:</b>\n"]
+    for uid, uname, reason in rows:
+        name = f"@{uname}" if uname else f"ID:{uid}"
+        lines.append(f"• {name} (<code>{uid}</code>) — {reason or '—'}")
+    b = InlineKeyboardBuilder()
+    b.button(text="🔓 Разбанить по ID", callback_data="adm_do_unban")
+    b.button(text="⬅️ Назад", callback_data="adm_main")
+    b.adjust(1)
+    await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_do_unban")
+async def cb_adm_do_unban(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.unban_id)
+    await callback.message.answer("Введите ID пользователя для разбана:")
+    await callback.answer()
+
+@dp.message(AdminFSM.unban_id)
+async def fsm_unban(message: types.Message, state: FSMContext):
+    try:
+        uid = int(message.text.strip())
+        unban_user(uid)
+        await message.answer(f"✅ Пользователь <code>{uid}</code> разбанен.", parse_mode="HTML")
+    except ValueError:
+        await message.answer("❌ Неверный ID")
+    await state.clear()
+
+@dp.callback_query(F.data == "adm_channels")
+async def cb_adm_channels(callback: types.CallbackQuery):
+    channels = get_required_channels()
+    text = ("📣 <b>Обязательные каналы подписки:</b>\n\n" + "\n".join(f"• {ch}" for ch in channels) +
+            "\n\n<code>/addchannel @username</code> — добавить\n<code>/delchannel @username</code> — удалить")
+    await callback.message.edit_text(text, reply_markup=kb_back_admin(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "adm_broadcast")
+async def cb_adm_broadcast(callback: types.CallbackQuery, state: FSMContext):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == 'True'):
+        await callback.answer("❌", show_alert=True); return
+    await state.set_state(AdminFSM.broadcast_text)
+    b = InlineKeyboardBuilder()
+    b.button(text="❌ Отмена", callback_data="adm_main")
+    await callback.message.edit_text(
+        "📢 <b>Рассылка</b>\n\nОтправь текст или медиа для рассылки всем пользователям:",
+        reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.message(AdminFSM.broadcast_text)
+async def fsm_broadcast(message: types.Message, state: FSMContext):
+    await state.clear()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT chat_id FROM users WHERE banned!='True'")
+    users = [r[0] for r in c.fetchall()]; conn.close()
+    sent = failed = 0
+    progress = await message.answer(f"📤 Начинаю рассылку на {len(users)} пользователей...")
+    for uid in users:
+        try:
+            if message.photo: await message.bot.send_photo(uid, message.photo[-1].file_id, caption=message.caption or "")
+            elif message.document: await message.bot.send_document(uid, message.document.file_id, caption=message.caption or "")
+            elif message.text: await message.bot.send_message(uid, message.text, parse_mode="HTML")
+            sent += 1
+        except: failed += 1
+        if (sent + failed) % 50 == 0:
+            try: await progress.edit_text(f"📤 Отправлено: {sent} | Ошибок: {failed}")
+            except: pass
+        await asyncio.sleep(0.05)
+    conn2 = sqlite3.connect(DB_PATH)
+    c2 = conn2.cursor()
+    c2.execute("INSERT INTO broadcasts (text, sent_at, sent_by, total_sent) VALUES (?,?,?,?)",
+               (message.text or message.caption or "[медиа]", datetime.datetime.now().isoformat(), message.from_user.id, sent))
+    conn2.commit(); conn2.close()
+    await progress.edit_text(f"✅ Рассылка завершена!\n📤 Отправлено: {sent}\n❌ Ошибок: {failed}")
+
+@dp.callback_query(F.data == "adm_poll_create")
+async def cb_adm_poll(callback: types.CallbackQuery, state: FSMContext):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
+    row = c.fetchone(); conn.close()
+    if not (row and row[0] == 'True'):
+        await callback.answer("❌", show_alert=True); return
+    await state.set_state(AdminFSM.poll_question)
+    await callback.message.answer("📋 Введите вопрос для опроса:")
+    await callback.answer()
+
+@dp.message(AdminFSM.poll_question)
+async def fsm_poll_q(message: types.Message, state: FSMContext):
+    await state.update_data(question=message.text)
+    await state.set_state(AdminFSM.poll_options)
+    await message.answer("Введите варианты ответов через запятую (2–10 вариантов):\nПример: Да, Нет, Не знаю")
+
+@dp.message(AdminFSM.poll_options)
+async def fsm_poll_opts(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    opts = [o.strip() for o in message.text.split(",") if o.strip()]
+    if len(opts) < 2 or len(opts) > 10:
+        await message.answer("❌ Нужно от 2 до 10 вариантов. Попробуйте ещё раз:"); return
+    await state.clear()
+    question = data['question']
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO polls (question, options, created_at, created_by) VALUES (?,?,?,?)",
+              (question, ",".join(opts), datetime.datetime.now().isoformat(), message.from_user.id))
+    conn.commit(); conn.close()
+    conn2 = sqlite3.connect(DB_PATH)
+    c2 = conn2.cursor()
+    c2.execute("SELECT chat_id FROM users WHERE banned!='True'")
+    users = [r[0] for r in c2.fetchall()]; conn2.close()
+    sent = 0
+    for uid in users:
+        try:
+            await message.bot.send_poll(uid, question=question, options=opts, is_anonymous=False)
+            sent += 1
+        except: pass
+        await asyncio.sleep(0.05)
+    await message.answer(f"✅ Опрос отправлен {sent} пользователям.")
+
+# ── Document handler ───────────────────────────────────────────────────
 @dp.message(F.document)
 async def handle_document_processing(message: types.Message, state: FSMContext):
-    letters = string.ascii_lowercase
-    r = ''.join(random.choice(letters) for i in range(length))
     user_id = message.from_user.id
     username = message.from_user.username or f"user_{user_id}"
+
+    # Антиспам
+    allowed, blocked_until = check_antispam(user_id)
+    if not allowed:
+        secs = max(0, int(blocked_until - time.time()))
+        await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
+
+    # Бан
+    banned_flag, ban_reason = is_banned(user_id)
+    if banned_flag:
+        await message.answer(f"🚫 Вы заблокированы. Причина: {ban_reason or '—'}"); return
+
+    letters = string.ascii_lowercase
+    r = ''.join(random.choice(letters) for _ in range(length))
     caption = message.caption or ''
     file_name = message.document.file_name
-    file_format = file_name.split('.')[1]
+    file_format = file_name.rsplit('.', 1)[-1].lower() if '.' in file_name else ''
+
     sub, message_to_send = await update(user_id, username)
     current_state = await state.get_state()
     if sub:
-        await message.answer(message_to_send)
-        return
-    is_subscribed, expiry_date_value = await get_user_status_async(user_id)
-    if not is_subscribed:
-        await message.answer(NOT_HI_MESSAGE)
-        return
-    if 'boti' in globals() and 'loging_id' in globals():
-        await send_log(message, "файл", f"Формат: {file_format.upper()}")
-    if '/color' in caption:
-        hex_color, alpha = parse_caption(caption)
-        if not hex_color:
-            await message.answer("❔ Пример использования: `/color #FF0000 0.4`\n"
-                                 "Цвет должен быть в HEX (например, #RRGGBB)! Альфа не обязательна",
-                                 parse_mode='Markdown')
-            return
-        src_dir = Path(f'work/work_COLOR/{r}')
-        await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-        download_path = src_dir / file_name
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
-        if file_format in ["jpeg", "jpg", "png"]:
-            await p_app.download_media(message.document, file_name=download_path)
-            processed_bytes = await asyncio.to_thread(_process_image_bytes, download_path, hex_color,
-                                                      alpha)
-            bio = io.BytesIO(processed_bytes)
-            bio.name = file_name
-            bio.seek(0)
-            y.delete()
-            await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                     parse_mode="HTML", force_document=True)
-        elif file_format == "zip":
-            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-            await p_app.download_media(message.document.file_id, file_name=download_path)
-            file_name2 = download_path.stem
-            work_dir_parent, output_zip_path = await color_optimized(hex_color, download_path, file_name2, alpha)
-            await y.delete()
-            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Файл готов!</b>',
-                                     parse_mode="HTML", force_document=True)
-            await asyncio.to_thread(os.remove, output_zip_path)
-        else:
-            await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
-        if src_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, src_dir)
-    elif '/filters' in caption:
-        filter, colvo = parse_filter(caption)
-        if len(message.caption.split()) < 3:
-            await message.answer(
-                "❔ Неверный формат данных. Используйте: /filters <filter> <col>\n\nПример использования: `/filters red` или `/filters light 100`\n\n-➤ Фильтры:\n└ red — усиление красного канала\n└ green — усиление зеленого канала\n└ blue — усиление синего канала\n└ grayscale — применение эффекта чёрно - белой палитры\n└ negate — создание эффекта негатива\n└ sepia — добавление теплого сепийного тона\n└ solarize — эффект передержки изображения└ light - яркось регулируемая\n└ saturation - насыщеность регулируемая\n└ contrast - контраст регулируемый\n└ clarity - четкость регулируемая",
-                                 parse_mode='Markdown')
-            return
-            return
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
-        src_dir = Path(f'work/work_COLOR/{r}')
-        await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-        download_path = src_dir / file_name
-        if file_format in ["jpeg", "jpg", "png"]:
-            await p_app.download_media(message.document, file_name=download_path)
-            processed_bytes = await asyncio.to_thread(apply_filter_on_bytes_optimized, download_path,
-                                                      filter, colvo)
-            bio = io.BytesIO(processed_bytes)
-            bio.name = file_name
-            bio.seek(0)
-            await y.delete()
-            await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                     parse_mode="HTML", force_document=True)
-        elif file_format == "zip":
-            await p_app.download_media(message.document.file_id, file_name=download_path)
-            file_name_stem = download_path.stem
-            output_zip_path = await filter_zip(filter, download_path, file_name_stem)
-            await y.delete()
-            await t_client.send_file(message.chat.id, output_zip_path,
-                                     caption=f'<b>⚡️ZIP с фильтром "{filter}" готов!</b>',
-                                     parse_mode="HTML", force_document=True)
-            await asyncio.to_thread(os.remove, download_path)
-            await asyncio.to_thread(os.remove, output_zip_path)
-            await asyncio.to_thread(shutil.rmtree, src_dir)
-        else:
-            await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
-    elif '/recolor' in caption:
-        recolor_params = parse_recolor_command(caption)
-        if not recolor_params:
-            await message.answer("❔ Пример: `/recolor #ffbbbb #661717 30`", parse_mode='Markdown')
-            return
-        target_hex, replacement_hex, tolerance = recolor_params
-        y = await message.answer(f"<b>⏳ Обрабатываю перекраску...</b>", parse_mode="HTML")
-        try:
-            if file_format in ["jpeg", "jpg", "png"]:
-                src_dir = Path(f'work/work_COLOR/{r}')
-                await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-                download_path = src_dir / file_name
-                await p_app.download_media(message.document, download_path)
-                processed_bytes = await asyncio.to_thread(_apply_recolor_to_bytes, download_path,
-                                                          target_hex, replacement_hex, tolerance)
-                if processed_bytes:
-                    bio = io.BytesIO(processed_bytes)
-                    bio.name = file_name
-                    bio.seek(0)
-                    await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                             parse_mode="HTML", force_document=True)
-                else:
-                    await message.answer("Произошла ошибка при обработке изображения.")
+        await message.answer(message_to_send); return
 
-            elif file_format == "zip":
-                download_path = Path(f'work/temp_downloads/src_{r}.zip')
-                await asyncio.to_thread(os.makedirs, download_path.parent, exist_ok=True)
-                await p_app.download_media(message.document.file_id, file_name=download_path)
-                zip_bytes_result = await recolor_zip_optimized(target_hex, replacement_hex, tolerance, download_path)
-                output_zip_path = Path(f'work/temp_downloads/out_{r}.zip')
-                await asyncio.to_thread(output_zip_path.write_bytes, zip_bytes_result)
+    is_subscribed, expiry_date_value = await get_user_status_async(user_id)
+
+    # Для free: проверка подписки на каналы
+    if not is_subscribed:
+        not_sub = await check_required_subs(user_id)
+        if not_sub:
+            await message.answer(
+                "🔔 <b>Подпишитесь на каналы для использования бота:</b>\n\n" +
+                "\n".join(f"• {ch}" for ch in not_sub) + "\n\nПосле подписки нажмите <b>✅ Проверить</b>",
+                reply_markup=kb_check_channels(not_sub), parse_mode="HTML"); return
+
+    # Для free: ограничение размера файла
+    if not is_subscribed:
+        file_size_mb = (message.document.file_size or 0) / (1024 * 1024)
+        if file_size_mb > FREE_MAX_FILE_MB:
+            await message.answer(
+                f"⚠️ <b>Ограничение бесплатной версии</b>\n\n"
+                f"Ваш файл: <b>{file_size_mb:.1f} МБ</b>\nМаксимум для Free: <b>{FREE_MAX_FILE_MB} МБ</b>\n\n"
+                f"Купите Premium для работы с большими файлами 👇",
+                reply_markup=kb_subscription_plans(), parse_mode="HTML"); return
+
+    inc_msg_count(user_id)
+
+    # Очередь
+    queue_msg = None
+    if is_subscribed:
+        await queue_acquire(True)
+    else:
+        queue_msg = await message.answer("⏳ <b>Ваш запрос в очереди...</b>", parse_mode="HTML")
+        await queue_acquire(False)
+        if queue_msg:
+            try: await queue_msg.delete()
+            except: pass
+
+    asyncio.create_task(auto_cleanup())
+
+    try:
+        if 'boti' in globals() and 'loging_id' in globals():
+            await send_log(message, "файл", f"Формат: {file_format.upper()}")
+
+        if '/color' in caption:
+            hex_color, alpha = parse_caption(caption)
+            if not hex_color:
+                await message.answer("❔ Пример: `/color #FF0000 0.4`", parse_mode='Markdown'); return
+            src_dir = Path(f'work/work_COLOR/{r}')
+            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
+            download_path = src_dir / file_name
+            y = await message.answer(f"<b>⏳ Обрабатываю...</b>", parse_mode="HTML")
+            if file_format in ["jpeg", "jpg", "png"]:
+                await p_app.download_media(message.document, file_name=download_path)
+                processed_bytes = await asyncio.to_thread(_process_image_bytes, download_path, hex_color, alpha)
+                bio = io.BytesIO(processed_bytes); bio.name = file_name; bio.seek(0)
                 await y.delete()
-                await t_client.send_file(message.chat.id, output_zip_path,
-                                         caption=f'<b>⚡️ZIP с перекраской готов!</b>', parse_mode="HTML",
-                                         force_document=True)
-                await asyncio.to_thread(os.remove, download_path)
+                await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>', parse_mode="HTML", force_document=True)
+            elif file_format == "zip":
+                await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
+                await p_app.download_media(message.document.file_id, file_name=download_path)
+                work_dir_parent, output_zip_path = await color_optimized(hex_color, download_path, download_path.stem, alpha)
+                await y.delete()
+                await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Файл готов!</b>', parse_mode="HTML", force_document=True)
                 await asyncio.to_thread(os.remove, output_zip_path)
             else:
-                await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
-        except Exception as e:
-            logging.exception("An error occurred during recolor process")
-            await message.answer(f"Произошла непредвиденная ошибка: {e}")
-        finally:
-            try:
-                await y.delete()
-            except Exception:
-                pass
-    elif '/quality' in caption:
-        level = parse_quality(caption)
-        if not level:
-            await message.answer("❔ Пример: `/qualiti 16`", parse_mode='Markdown')
-            return
-        processing_message = await message.answer("Обрабатываю...")
-        try:
+                await message.answer(f"❔ Неподдерживаемый формат: .{file_format}")
+            if src_dir.exists(): await asyncio.to_thread(shutil.rmtree, src_dir)
+
+        elif '/filters' in caption:
+            filter_name, colvo = parse_filter(caption)
+            if len(message.caption.split()) < 3:
+                await message.answer("❔ Пример: `/filters red` или `/filters light 100`", parse_mode='Markdown'); return
+            y = await message.answer(f"<b>⏳ Обрабатываю...</b>", parse_mode="HTML")
+            src_dir = Path(f'work/work_COLOR/{r}')
+            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
+            download_path = src_dir / file_name
             if file_format in ["jpeg", "jpg", "png"]:
+                await p_app.download_media(message.document, file_name=download_path)
+                processed_bytes = await asyncio.to_thread(apply_filter_on_bytes_optimized, download_path, filter_name, colvo)
+                bio = io.BytesIO(processed_bytes); bio.name = file_name; bio.seek(0)
+                await y.delete()
+                await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>', parse_mode="HTML", force_document=True)
+            elif file_format == "zip":
+                await p_app.download_media(message.document.file_id, file_name=download_path)
+                output_zip_path = await filter_zip(filter_name, download_path, download_path.stem)
+                await y.delete()
+                await t_client.send_file(message.chat.id, output_zip_path, caption=f'<b>⚡️ZIP с фильтром "{filter_name}" готов!</b>', parse_mode="HTML", force_document=True)
+                await asyncio.to_thread(os.remove, download_path)
+                await asyncio.to_thread(os.remove, output_zip_path)
+                await asyncio.to_thread(shutil.rmtree, src_dir)
+            else:
+                await message.answer(f"❔ Неподдерживаемый формат: .{file_format}")
+
+        elif '/recolor' in caption:
+            recolor_params = parse_recolor_command(caption)
+            if not recolor_params:
+                await message.answer("❔ Пример: `/recolor #ffbbbb #661717 30`", parse_mode='Markdown'); return
+            target_hex, replacement_hex, tolerance = recolor_params
+            y = await message.answer(f"<b>⏳ Обрабатываю перекраску...</b>", parse_mode="HTML")
+            try:
+                if file_format in ["jpeg", "jpg", "png"]:
+                    src_dir = Path(f'work/work_COLOR/{r}')
+                    await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
+                    download_path = src_dir / file_name
+                    await p_app.download_media(message.document, download_path)
+                    processed_bytes = await asyncio.to_thread(_apply_recolor_to_bytes, download_path, target_hex, replacement_hex, tolerance)
+                    if processed_bytes:
+                        bio = io.BytesIO(processed_bytes); bio.name = file_name; bio.seek(0)
+                        await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>', parse_mode="HTML", force_document=True)
+                    else:
+                        await message.answer("Произошла ошибка при обработке.")
+                elif file_format == "zip":
+                    download_path = Path(f'work/temp_downloads/src_{r}.zip')
+                    await asyncio.to_thread(os.makedirs, download_path.parent, exist_ok=True)
+                    await p_app.download_media(message.document.file_id, file_name=download_path)
+                    zip_bytes_result = await recolor_zip_optimized(target_hex, replacement_hex, tolerance, download_path)
+                    output_zip_path = Path(f'work/temp_downloads/out_{r}.zip')
+                    await asyncio.to_thread(output_zip_path.write_bytes, zip_bytes_result)
+                    await y.delete()
+                    await t_client.send_file(message.chat.id, output_zip_path, caption=f'<b>⚡️ZIP с перекраской готов!</b>', parse_mode="HTML", force_document=True)
+                    await asyncio.to_thread(os.remove, download_path)
+                    await asyncio.to_thread(os.remove, output_zip_path)
+                else:
+                    await message.answer(f"❔ Неподдерживаемый формат: .{file_format}")
+            except Exception as e:
+                await message.answer(f"Непредвиденная ошибка: {e}")
+            finally:
+                try: await y.delete()
+                except: pass
+
+        elif '/quality' in caption:
+            level = parse_quality(caption)
+            if not level:
+                await message.answer("❔ Пример: `/quality 16`", parse_mode='Markdown'); return
+            processing_message = await message.answer("Обрабатываю...")
+            try:
+                if file_format in ["jpeg", "jpg", "png"]:
+                    src_dir = Path(f'work/work_COLOR/{r}')
+                    await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
+                    download_path = src_dir / file_name
+                    await p_app.download_media(message.document, file_name=download_path)
+                    processed_bytes = await asyncio.to_thread(quality_func, download_path, level)
+                    bio = io.BytesIO(processed_bytes); bio.name = file_name; bio.seek(0)
+                    await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>', parse_mode="HTML", force_document=True)
+                elif file_format == "zip":
+                    download_path = Path(f'work/temp_downloads/src_{r}.zip')
+                    await asyncio.to_thread(os.makedirs, download_path.parent, exist_ok=True)
+                    await p_app.download_media(message.document.file_id, file_name=download_path)
+                    zip_bytes_result = await quality_zip(level, download_path)
+                    output_zip_path = Path(f'work/temp_downloads/out_{r}.zip')
+                    await asyncio.to_thread(output_zip_path.write_bytes, zip_bytes_result)
+                    await processing_message.delete()
+                    await t_client.send_file(message.chat.id, output_zip_path, caption=f'<b>⚡️ZIP с качеством готов!</b>', parse_mode="HTML", force_document=True)
+                    await asyncio.to_thread(os.remove, download_path)
+                    await asyncio.to_thread(os.remove, output_zip_path)
+                else:
+                    await message.answer(f"❔ Неподдерживаемый формат: .{file_format}")
+            except Exception as e:
+                await message.answer(f"Непредвиденная ошибка: {e}")
+            finally:
+                try: await processing_message.delete()
+                except: pass
+
+        elif '/aim' in caption:
+            if file_format not in ["png", "jpg", "jpeg"]:
+                await message.answer(f"❔ Неподдерживаемый формат: .{file_format}"); return
+            processing_message = await message.answer("Обрабатываю...")
+            try:
                 src_dir = Path(f'work/work_COLOR/{r}')
                 await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
                 download_path = src_dir / file_name
                 await p_app.download_media(message.document, file_name=download_path)
-                processed_bytes = await asyncio.to_thread(quality_func, download_path, level)
-                bio = io.BytesIO(processed_bytes)
-                bio.name = file_name
-                bio.seek(0)
-                await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                         parse_mode="HTML", force_document=True)
+                processed_bytes = await asyncio.to_thread(process_aim_image_optimized, download_path)
+                bio = io.BytesIO(processed_bytes); bio.name = f"aim_{file_name}"
+                await t_client.send_file(message.chat.id, bio, caption=f'<b>⚡️Прицел готов!</b>', parse_mode="HTML", force_document=True)
+            except Exception as e:
+                await message.answer(f"Ошибка: {e}")
+            finally:
+                await processing_message.delete()
 
+        elif '/compress' in caption:
+            width, height = parse_caption_for_compression(caption)
+            if not width:
+                await message.answer("Ошибка парсинга размера."); return
+            target_size = (width, height)
+            processing_message = await message.answer(f"Обрабатываю сжатие до {width}x{height}...")
+            src_dir = Path(f'work/work_COMPRESS/{r}')
+            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
+            download_path = src_dir / file_name
+            if file_format in ["jpeg", "jpg", "png"]:
+                await p_app.download_media(message.document, file_name=download_path)
+                processed_bytes, new_format = await asyncio.to_thread(_compress_image_bytes_sync, download_path, target_size, file_format)
+                bio = io.BytesIO(processed_bytes); bio.name = f"compressed_{Path(file_name).stem}.{new_format}"
+                await processing_message.delete()
+                await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>', parse_mode="HTML", force_document=True)
             elif file_format == "zip":
-                download_path = Path(f'work/temp_downloads/src_{r}.zip')
-                await asyncio.to_thread(os.makedirs, download_path.parent, exist_ok=True)
-                await p_app.download_media(message.document.file_id, file_name=download_path)
-                zip_bytes_result = await quality_zip(level, download_path)
-                output_zip_path = Path(f'work/temp_downloads/out_{r}.zip')
-                await asyncio.to_thread(output_zip_path.write_bytes, zip_bytes_result)
+                await p_app.download_media(message.document.file_id, destination=download_path)
+                output_zip_path = src_dir / f"{download_path.stem}_compressed.zip"
+                await asyncio.to_thread(_process_zip_sync, download_path, output_zip_path, target_size)
                 await processing_message.delete()
-                await t_client.send_file(message.chat.id, output_zip_path,
-                                         caption=f'<b>⚡️ZIP с качеством готов!</b>', parse_mode="HTML",
-                                         force_document=True)
-                await asyncio.to_thread(os.remove, download_path)
-                await asyncio.to_thread(os.remove, output_zip_path)
+                await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Файл готов!</b>', parse_mode="HTML", force_document=True)
             else:
-                await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
-        except Exception as e:
-            logging.exception("An error occurred during recolor process")
-            await message.answer(f"Произошла непредвиденная ошибка: {e}")
-        finally:
-            try:
                 await processing_message.delete()
-            except Exception:
-                pass
-    elif '/aim' in caption:
-        if file_format not in ["png", "jpg", "jpeg"]:
-            await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
-            return
-        processing_message = await message.answer("Обрабатываю...")
-        try:
-            src_dir = Path(f'work/work_COLOR/{r}')
-            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-            download_path = src_dir / file_name
-            await p_app.download_media(message.document, file_name=download_path)
-            processed_bytes = await asyncio.to_thread(process_aim_image_optimized, download_path)
-            bio = io.BytesIO(processed_bytes)
-            bio.name = f"aim_{file_name}"
-            await t_client.send_file(message.chat.id, bio, caption=f'<b>⚡️Прицел готов!</b>',
-                                     parse_mode="HTML", force_document=True)
-        except Exception as e:
-            logging.exception("An error occurred during /aim processing")
-            await message.answer(f"Произошла ошибка при обработке: {e}")
-        finally:
-            await processing_message.delete()
-    elif '/compress' in caption:
-        if message.document:
-            file_name = message.document.file_name
-            file_format = file_name.split('.')[-1].lower()
-            file_id = message.document.file_id
-        else:
-            await message.answer("Пожалуйста, отправьте файл документом.")
-            return
-        width, height = parse_caption_for_compression(caption)
-        if not width:
-            await message.answer("Ошибка парсинга размера.")
-            return
-        target_size = (width, height)
-        processing_message = await message.answer(f"Обрабатываю сжатие до {width}x{height}...", parse_mode='Markdown')
-        src_dir = Path(f'work/work_COMPRESS/{r}')
-        await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-        download_path = src_dir / file_name
-        if file_format in ["jpeg", "jpg", "png"]:
-            src_dir = Path(f'work/work_COLOR/{r}')
-            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-            download_path = src_dir / file_name
-            await p_app.download_media(message.document, file_name=download_path)
-            processed_bytes, new_format = await asyncio.to_thread(_compress_image_bytes_sync,
-                                                                  download_path, target_size,
-                                                                  file_format)
-            original_stem = Path(file_name).stem
-            bio = io.BytesIO(processed_bytes)
-            bio.name = f"compressed_{original_stem}.{new_format}"
-            await processing_message.delete()
-            await t_client.send_file(message.chat.id, bio, caption='<b>⚡️Файл готов!</b>',
-                                     parse_mode="HTML", force_document=True)
-        elif file_format == "zip":
-            await p_app.download_media(file_id, destination=download_path)
-            file_name_stem = download_path.stem
-            output_zip_path = src_dir / f"{file_name_stem}_compressed.zip"
-            await asyncio.to_thread(_process_zip_sync, download_path, output_zip_path, target_size)
-            await processing_message.delete()
-            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Файл готов!</b>',
-                                     parse_mode="HTML", force_document=True)
-        else:
-            await processing_message.delete()
-            await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
-        if src_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, src_dir)
-    elif '/logo' in caption:
-        n = ''.join(random.choice(string.ascii_lowercase) for i in range(length))
-        work_dir = Path(f'work/work_LOGO/{r}')
-        await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
-        src = os.path.join(work_dir, file_name)
-        download_path = work_dir / file_name
-        try:
-            await p_app.download_media(message.document.file_id, file_name=download_path)
-            file_name_stem = download_path.stem
-            y = await message.answer("Обрабатываю...")
-            success, zip_path = await asyncio.get_running_loop().run_in_executor(None, create_and_zip_files, src,
-                                                                                 work_dir, n, file_format, "logo",
-                                                                                 FILE_SUFFIXES)
-            await y.delete()
-            await t_client.send_file(message.chat.id, zip_path, caption=f'<b>⚡️Ваши логотипы готовы!</b>',
-                                     parse_mode='HTML')
-        except Exception as e:
-            await message.answer(f"Произошла ошибка: {e}")
-        finally:
-            if os.path.exists(work_dir):
-                shutil.rmtree(work_dir)
-    elif '/tree' in caption:
-        n = ''.join(random.choice(string.ascii_lowercase) for i in range(length))
-        work_dir = Path(f'work/work_TREE/{r}')
-        await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
-        src = os.path.join(work_dir, file_name)
-        download_path = work_dir / file_name
-        try:
-            await p_app.download_media(message.document.file_id, file_name=download_path)
-            file_name_stem = download_path.stem
-            y = await message.answer("Обрабатываю...")
-            success, zip_path = await asyncio.get_running_loop().run_in_executor(None, create_and_zip_files, src,
-                                                                                 work_dir, n, file_format, "tree", Tree)
-            await y.delete()
-            await t_client.send_file(message.chat.id, zip_path, caption=f'<b>⚡️Ваши деревья готовы!</b>',
-                                     parse_mode="HTML", force_document=True)
-        except Exception as e:
-            await message.answer(f"Произошла ошибка: {e}")
-        finally:
-            if os.path.exists(work_dir):
-                shutil.rmtree(work_dir)
-    elif '/bild' in caption:
-        n = ''.join(random.choice(string.ascii_lowercase) for i in range(length))
-        work_dir = Path(f'work/work_BILD/{r}')
-        await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
-        src = os.path.join(work_dir, file_name)
-        download_path = work_dir / file_name
-        try:
-            await p_app.download_media(message.document.file_id, file_name=download_path)
-            file_name_stem = download_path.stem
-            y = await message.answer("Обрабатываю...")
-            success, zip_path = await asyncio.get_running_loop().run_in_executor(None, create_and_zip_files, src,
-                                                                                 work_dir, n, file_format, "bild", bild)
-            await y.delete()
-            await t_client.send_file(message.chat.id, zip_path, caption=f'<b>⚡️Ваши билдборды готовы!</b>',
-                                     parse_mode="HTML", force_document=True)
-        except Exception as e:
-            await message.answer(f"Произошла ошибка: {e}")
-        finally:
-            if os.path.exists(work_dir):
-                shutil.rmtree(work_dir)
-    elif '/map' in caption:
-        if file_format in ["jpeg", "jpg", "png"]:
-            y = await message.answer("Обрабатываю...")
-            src_dir = Path(f'work/work_MAP/{r}')
-            src_dir.mkdir(parents=True, exist_ok=True)
-            file_path = src_dir / file_name
-            abs_path = str(file_path.absolute())
-            await p_app.download_media(message.document, file_name=abs_path)
-            img = Image.open(abs_path)
-            width, height = img.size
-            num_squares_side = 14
-            square_width = width // num_squares_side
-            square_height = height // num_squares_side
-            total_squares = num_squares_side * num_squares_side
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-                for i in range(num_squares_side):
-                    for j in range(num_squares_side):
-                        left = j * square_width
-                        top = i * square_height
-                        right = (j + 1) * square_width
-                        bottom = (i + 1) * square_height
-                        box = (left, top, right, bottom)
-                        square = img.crop(box)
-                        square_buffer = io.BytesIO()
-                        save_format = 'JPEG' if file_format in ['jpeg', 'jpg'] else 'PNG'
-                        square.save(square_buffer, format=save_format)
-                        square_buffer.seek(0)
-                        filename = f"radar{str(i * num_squares_side + j).zfill(2)}.{save_format.lower()}"
-                        archive.writestr(filename, square_buffer.getvalue())
-            zip_buffer.seek(0)
-            zip_buffer.name = f'{r}_radar.zip'
-            await y.delete()
-            await t_client.send_file(message.chat.id, zip_buffer, caption=f'<b>⚡️Ваша карта готова!</b>',
-                                     parse_mode='HTML')
+                await message.answer(f"❔ Неподдерживаемый формат: .{file_format}")
+            if src_dir.exists(): await asyncio.to_thread(shutil.rmtree, src_dir)
 
-    elif '/remap' in caption:
-
-        chat_id = message.chat.id
-        document = message.document
-        if not document.file_name.lower().endswith('.zip'):
-            await message.answer("Пожалуйста, загрузите файл с расширением .zip.")
-            return
-        y = await message.answer("Восстанавливаю изображение... ️")
-        work_dir = Path(f'work/work_MAP/{r}')
-        await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
-        download_path = work_dir / file_name
-        await p_app.download_media(message.document.file_id, file_name=download_path)
-        images_dict = {}
-        num_squares_side = 14
-        total_squares = num_squares_side * num_squares_side
-        with zipfile.ZipFile(download_path, 'r') as archive:
-            for zipinfo in archive.infolist():
-                filename = zipinfo.filename
-                if filename.startswith('radar') and (
-                        filename.endswith('.jpg') or filename.endswith('.jpeg') or filename.endswith('.png')):
-                    index_str = filename[5:-4]
-                    index = int(index_str.replace(".", ""))
-                    with archive.open(zipinfo) as file_in_zip:
-                        img_data = file_in_zip.read()
-                        images_dict[index] = Image.open(io.BytesIO(img_data))
-        if len(images_dict) != total_squares:
-            await y.delete()
-            await message.answer(
-                f"Найдено только {len(images_dict)} из {total_squares} необходимых частей в архиве.")
-            return
-        first_image = next(iter(images_dict.values()))
-        square_width, square_height = first_image.size
-        total_width = square_width * num_squares_side
-        total_height = square_height * num_squares_side
-        restored_img = Image.new('RGBA', (total_width, total_height))
-        for index in range(total_squares):
-            img = images_dict[index]
-            i = index // num_squares_side
-            j = index % num_squares_side
-            left = j * square_width
-            top = i * square_height
-            restored_img.paste(img, (left, top))
-            del images_dict[index]
-        jjj = f'work/work_MAP/{r}/restored_radar.png'
-        restored_img.save(jjj, format='PNG', quality=95)
-        await y.delete()
-        await t_client.send_file(chat_id, jjj,
-                                 caption=f'<b>⚡️Твое восстановленное изображение готово!</b>',
-                                 parse_mode=enums.ParseMode.HTML, force_document=True)
-    elif '/hudcut' in caption:
-        if file_format not in ["png", "jpg", "jpeg"]:
-            await message.answer(f"❔ Неподдерживаемый формат файла: .{file_format}")
-            return
-        processing_message = await message.answer("Обрабатываю...")
-        try:
-            src_dir = Path(f'work/work_HUD/{r}')
-            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-            download_path = src_dir / file_name
-            await p_app.download_media(message.document, download_path)
-            zip_buffer, count = await asyncio.to_thread(process_image_sync, download_path)
-            zip_buffer.seek(0)
-            zip_buffer.name = f'{r}_hudcut.zip'
-            await t_client.send_file(message.chat.id, zip_buffer,
-                                     caption=f'<b>⚡️Ваш нарезаный худ готов!</b>', parse_mode="HTML",
-                                     force_document=True)
-        except Exception as e:
-            logging.exception("Ошибка hudcut")
-        finally:
-            await processing_message.delete()
-    elif '/rehud' in caption:
-
-        chat_id = message.chat.id
-        document = message.document
-        if not document.file_name.lower().endswith('.zip'):
-            await message.answer("Пожалуйста, загрузите файл с расширением .zip.")
-            return
-        y = await message.answer("Восстанавливаю изображение... ️")
-        work_dir = Path(f'work/work_HUD/{r}')
-        await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
-        download_path = work_dir / file_name
-        await p_app.download_media(message.document.file_id, file_name=download_path)
-        await asyncio.to_thread(assemble_image_from_zip_bytes, download_path, f'work/work_HUD/{r}/rehud_{r}.png')
-        await y.delete()
-        await t_client.send_file(chat_id, f'work/work_HUD/{r}/rehud_{r}.png',
-                                 caption=f'<b>⚡️Твое восстановленное изображение готово!</b>',
-                                 parse_mode=enums.ParseMode.HTML, force_document=True)
-    elif '/genrl' in caption:
-        chat_id = message.chat.id
-        work_dir = Path(f'work/work_BPC/{r}')
-        work_dir.mkdir(parents=True, exist_ok=True)
-        y = await message.answer("<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML")
-        file_name = message.document.file_name
-        download_path = work_dir / file_name
-        bpcmeta_path = work_dir / f'{r}_GENERIC.bpcmeta'
-        try:
-            await p_app.download_media(message.document.file_id, file_name=str(download_path))
-            # Determine zip target: use as-is if valid zip, else try XOR decrypt
-            genrl_target = str(download_path)
-            if not zipfile.is_zipfile(str(download_path)):
-                raw = read_file_bytes(str(download_path))
-                xor_key = detect_key_pattern(raw)
-                dec = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
-                dec_path = work_dir / (Path(file_name).stem + '_dec.zip')
-                dec_path.write_bytes(bytes(dec))
-                if not zipfile.is_zipfile(str(dec_path)):
-                    raise ValueError("Файл не является zip-архивом и не удалось расшифровать.")
-                genrl_target = str(dec_path)
-            generate_bpcmeta(genrl_target, str(bpcmeta_path))
-            await y.delete()
-            await t_client.send_file(chat_id, str(bpcmeta_path),
-                                     caption='<b>⚡️Твой генрл готов!</b>',
-                                     parse_mode='html', force_document=True)
-        except Exception as e:
-            await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
-        finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        return
-    elif "/bpc" in caption:
-        for id in loging_id:
-            await boti.send_message(id,
-                                    f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка bpc)")
-        file_name = message.document.file_name
-        temp_dir = os.path.join(f"work/work_BPC/{r}")
-        os.makedirs(temp_dir, exist_ok=True)
-        await p_app.download_media(message.document.file_id, file_name=f'work/work_BPC/{r}/{file_name}')
-        await process_zip_file(file_name, message, r, temp_dir)
-        return
-    elif "/nri" in caption:
-        for id in loging_id:
-            await boti.send_message(id,
-                                    f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} /nri")
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
-        file_name = message.document.file_name
-        temp_dir = os.path.join(f"work/work_Z2N/{r}")
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_dir = f"work/work_Z2N/{r}"
-        await p_app.download_media(message.document.file_id, file_name=f'work/work_Z2N/{r}/{file_name}')
-        i = convert_zip2nonerai(f'work/work_Z2N/{r}/{file_name}', temp_dir)
-        await y.delete()
-        await t_client.send_file(message.chat.id, i, caption='<b>⚡️Твоя сборка готова!</b>',
-                                 parse_mode="HTML", force_document=True)
-        shutil.rmtree(temp_dir)
-        return
-    elif '/merger' in caption:
-        parts = caption.split()
-        if len(parts) < 2:
-            await message.answer("❔ Формат: /merger <имя_текстуры>\nПример: /merger mytexture")
-            return
-        target_name = parts[1]
-        if file_format not in ('zip', 'bpc'):
-            await message.answer("❔ Загрузите .zip или .bpc архив с нужными файлами.")
-            return
-        y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
-        work_dir = Path(f'work/work_BPC/{r}')
-        work_dir.mkdir(parents=True, exist_ok=True)
-        download_path = work_dir / file_name
-        try:
-            await p_app.download_media(message.document.file_id, file_name=download_path)
-            raw = read_file_bytes(str(download_path))
-            if file_format == 'bpc':
-                xor_key = detect_key_pattern(raw)
-                raw = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
-            with zipfile.ZipFile(io.BytesIO(bytes(raw)), 'r') as zf:
-                names_in_zip = [
-                    Path(n).stem
-                    for n in zf.namelist()
-                    if not n.endswith('/') and not n.startswith('__MACOSX')
-                ]
-            merger_data = {target_name: names_in_zip}
-            merger_path = work_dir / f'Merger_{r}.json'
-            with open(merger_path, 'w', encoding='utf-8') as f:
-                json.dump(merger_data, f, indent=4, ensure_ascii=False)
-            await y.delete()
-            await t_client.send_file(message.chat.id, str(merger_path),
-                                     caption=f'<b>⚡️Merger.json готов!</b>\n📄 Файлов в списке: {len(names_in_zip)}',
-                                     parse_mode="HTML", force_document=True)
-        except Exception as e:
-            await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
-        finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        return
-    elif '/index' in caption:
-        y = await message.answer("⏳<b>Индексирую...</b>", parse_mode="HTML")
-        work_dir = Path(f'work/work_BPC/{r}')
-        work_dir.mkdir(parents=True, exist_ok=True)
-        download_path = work_dir / file_name
-        try:
-            await p_app.download_media(message.document.file_id, file_name=download_path)
-            raw = read_file_bytes(str(download_path))
-            out_zip_buf = io.BytesIO()
-            with zipfile.ZipFile(io.BytesIO(bytes(raw)), 'r') as zf_in:
-                with zipfile.ZipFile(out_zip_buf, 'w', zipfile.ZIP_STORED) as zf_out:
-                    for info in zf_in.infolist():
-                        if info.is_dir() or info.filename.startswith('__MACOSX'):
-                            continue
-                        data = zf_in.read(info.filename)
-                        truncated = data[:136]
-                        zf_out.writestr(info.filename, truncated)
-            out_zip_buf.seek(0)
-            out_name = Path(file_name).stem + '.tmb'
-            out_zip_buf.name = out_name
-            await y.delete()
-            await t_client.send_file(message.chat.id, out_zip_buf,
-                                     caption=f'<b>⚡️Индекс готов!</b>\n📦 {out_name}',
-                                     parse_mode="HTML", force_document=True)
-        except Exception as e:
-            await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
-        finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        return
-    elif '/ptk' in caption:
-        chat_id = message.chat.id
-        document = message.document
-        y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
-        work_dir = Path(f'work/work_COLOR/{r}')
-        await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
-        file_name = message.document.file_name
-        download_path = work_dir / file_name
-        await p_app.download_media(message.document.file_id, file_name=download_path)
-        o = await create_palette_image(f'work/work_COLOR/{r}/{file_name}', file_name, n_colors=10 , output_file=f'work/work_COLOR/{r}/palette.png')
-        await y.delete()
-        await t_client.send_file(chat_id, f'work/work_COLOR/{r}/palette.png', caption=f'<b>⚡️{o}</b>',
-                                 parse_mode="HTML")
-        shutil.rmtree(work_dir)
-        return
-    elif '/overlay' in caption:
-        if len(message.caption.split()) < 3:
-            await message.answer(
-                "❔ Неверный формат данных. Используйте: /overlay <mode> <alpha>\n\nПример использования: /overlay overlay 16\n\nРабочие моды:\n└ multiply -  Наложение на БЕЛОЕ (затемнение)\n└ screen - Наложение на ЧЕРНОЕ (осветление)\n└ overlay -  Смешанный режим (контрастный)\n└ add - Экстремальное осветление\n└ darker -  Оставляет только самые темные пиксели")
-            return
-        parts = caption.split()
-        mode = parts[1] if len(parts) > 1 else "normal"
-        alpha = int(parts[2]) if len(parts) > 2 else 100
-        if file_format not in ["jpeg", "jpg", "png", "zip"]:
-            return await message.answer("❌ Поддерживаются только изображения или архив!")
-        src_dir = Path(f'work/work_OVERLAY/{r}')
-        os.makedirs(src_dir, exist_ok=True)
-        download_path = src_dir / file_name
-        await p_app.download_media(message.document, file_name=str(download_path))
-        await state.update_data(
-            base_path=str(download_path),
-            mode=mode,
-            alpha=alpha,
-            original_name=file_name
-        )
-        await state.set_state(OverlayStates.waiting_for_second_image)
-        await message.answer(
-            f"<b>✅ Первый файл получен!</b>\nРежим: <code>{mode}</code>\nПрозрачность: <code>{alpha}%</code>\n\nТеперь пришли <b>второй файл</b> (документом) для наложения.",
-            parse_mode="HTML")
-        return
-    if current_state == OverlayStates.waiting_for_second_image:
-        second_ext = file_name.split('.')[-1].lower()
-        second_path = Path(f"work/work_OVERLAY/temp_overlay_{r}.{second_ext}")
-        data = await state.get_data()
-        y = await message.answer(f"<b>⏳ Начинаю обработку...</b>", parse_mode="HTML")
-        second_ext = file_name.split('.')[-1].lower()
-        second_path = Path(f"work/work_OVERLAY/overlay_src_{r}.{second_ext}")
-        await p_app.download_media(message.document, file_name=str(second_path))
-        if data['original_name'].lower().endswith('.zip'):
-            result_buffer = await asyncio.to_thread(
-                _process_zip_overlay,
-                data['base_path'],
-                str(second_path),
-                data['mode'],
-                data['alpha']
-            )
-            out_filename = f"processed_{r}.zip"
-        else:
-            processed_bytes = await asyncio.to_thread(
-                _process_overlay_logic,
-                data['base_path'],
-                str(second_path),
-                data['mode'],
-                data['alpha']
-            )
-            result_buffer = io.BytesIO(processed_bytes)
-            out_filename = f"result_{data['original_name']}"
-        result_buffer.name = out_filename
-        result_buffer.seek(0)
-        await t_client.send_file(message.chat.id, result_buffer, caption='<b>⚡️ Готово!</b>', parse_mode="HTML",
-                                 force_document=True)
-        await y.delete()
-        await state.clear()
-        return
-    else:
-        # No caption command matched — handle by file format
-        if file_format == "ifp":
-            for id in loging_id:
-                await boti.send_message(id,
-                                        f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
-            src_dir = Path(f'work/work_ANI/{r}')
-            os.mkdir(src_dir)
-            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-            download_path = src_dir / file_name
-            await p_app.download_media(message.document, download_path)
-            file_name = message.document.file_name
-            file_name2 = file_name.split(".")[0]
-            ani_file_path = f'work/work_ANI/{r}/{file_name2}.ani'
-            y = await message.answer("Обрабатываю...")
-            with open(download_path, 'rb') as f_input, open(ani_file_path, 'wb') as f_output:
-                f_input.seek(8)
-                byte = f_input.read(8)
-                while byte:
-                    f_output.write(byte)
-                    byte = f_input.read(8)
-            async with aiofiles.open(ani_file_path, "rb") as f:
-                original_data = await f.read()
-                new_data = b'\x41\x4E\x50\x33' + original_data
-            with open(ani_file_path, 'wb') as er:
-                er.write(new_data)
-            await y.delete()
-            await t_client.send_file(message.chat.id, f'work/work_ANI/{r}/{file_name2}.ani',
-                                     caption=f'<b>⚡️Ваша анимация готова!</b>', parse_mode="HTML", force_document=True)
-            os.removedirs(f'work/work_ANI/{r}')
-        elif file_format == "json":
-            work_dir = Path(f'work/temp_downloads/{r}')
+        elif '/logo' in caption:
+            n = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+            work_dir = Path(f'work/work_LOGO/{r}')
             await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
             src = os.path.join(work_dir, file_name)
             download_path = work_dir / file_name
             try:
                 await p_app.download_media(message.document.file_id, file_name=download_path)
                 y = await message.answer("Обрабатываю...")
-                i = await asyncio.get_running_loop().run_in_executor(None, process_json_file, src)
+                success, zip_path = await asyncio.get_running_loop().run_in_executor(None, create_and_zip_files, src, work_dir, n, file_format, "logo", FILE_SUFFIXES)
                 await y.delete()
-                await message.answer(str(i))
-            except Exception as e:
-                await message.answer(f"Произошла ошибка: {e}")
+                await t_client.send_file(message.chat.id, zip_path, caption=f'<b>⚡️Ваши логотипы готовы!</b>', parse_mode='HTML')
+            except Exception as e: await message.answer(f"Ошибка: {e}")
             finally:
-                if os.path.exists(work_dir):
-                    shutil.rmtree(work_dir)
-        elif file_format == "cls":
-            for id in loging_id:
-                await boti.send_message(id,
-                                        f"[{datetime.datetime.now()}] @{message.from_user.username} ({message.from_user.id}) Отправил файл - {message.document.file_name} без подписи(обработка ipf)")
-            src_dir = Path(f'work/work_COL/{r}')
-            os.mkdir(src_dir)
-            await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
-            download_path = src_dir / file_name
-            await p_app.download_media(message.document, download_path)
-            file_name2 = file_name.split(".")[0]
-            ani_file_path = f'work/work_COL/{r}/{file_name2}.col'
-            y = await message.answer("Обрабатываю...")
-            with open(download_path, 'rb') as f_input, open(ani_file_path, 'wb') as f_output:
-                f_input.seek(4)
-                byte = f_input.read(4)
-                while byte:
-                    f_output.write(byte)
-                    byte = f_input.read(4)
-            async with aiofiles.open(ani_file_path, "rb") as f:
-                original_data = await f.read()
-                new_data = b'\x43\x4F\x4C\x33' + original_data
-            with open(ani_file_path, 'wb') as er:
-                er.write(new_data)
+                if os.path.exists(work_dir): shutil.rmtree(work_dir)
+
+        elif '/tree' in caption:
+            n = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+            work_dir = Path(f'work/work_TREE/{r}')
+            await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
+            src = os.path.join(work_dir, file_name)
+            download_path = work_dir / file_name
+            try:
+                await p_app.download_media(message.document.file_id, file_name=download_path)
+                y = await message.answer("Обрабатываю...")
+                success, zip_path = await asyncio.get_running_loop().run_in_executor(None, create_and_zip_files, src, work_dir, n, file_format, "tree", Tree)
+                await y.delete()
+                await t_client.send_file(message.chat.id, zip_path, caption=f'<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML", force_document=True)
+            except Exception as e: await message.answer(f"Ошибка: {e}")
+            finally:
+                if os.path.exists(work_dir): shutil.rmtree(work_dir)
+
+        elif '/bild' in caption:
+            n = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+            work_dir = Path(f'work/work_BILD/{r}')
+            await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
+            src = os.path.join(work_dir, file_name)
+            download_path = work_dir / file_name
+            try:
+                await p_app.download_media(message.document.file_id, file_name=download_path)
+                y = await message.answer("Обрабатываю...")
+                success, zip_path = await asyncio.get_running_loop().run_in_executor(None, create_and_zip_files, src, work_dir, n, file_format, "bild", bild)
+                await y.delete()
+                await t_client.send_file(message.chat.id, zip_path, caption=f'<b>⚡️Ваши билдборды готовы!</b>', parse_mode="HTML", force_document=True)
+            except Exception as e: await message.answer(f"Ошибка: {e}")
+            finally:
+                if os.path.exists(work_dir): shutil.rmtree(work_dir)
+
+        elif '/map' in caption:
+            if file_format in ["jpeg", "jpg", "png"]:
+                y = await message.answer("Обрабатываю...")
+                src_dir = Path(f'work/work_MAP/{r}')
+                src_dir.mkdir(parents=True, exist_ok=True)
+                file_path = src_dir / file_name
+                await p_app.download_media(message.document, file_name=str(file_path.absolute()))
+                img = Image.open(str(file_path.absolute()))
+                width, height = img.size
+                num_squares_side = 14
+                square_width = width // num_squares_side
+                square_height = height // num_squares_side
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+                    for i in range(num_squares_side):
+                        for j_idx in range(num_squares_side):
+                            box = (j_idx*square_width, i*square_height, (j_idx+1)*square_width, (i+1)*square_height)
+                            square = img.crop(box)
+                            square_buffer = io.BytesIO()
+                            save_format = 'JPEG' if file_format in ['jpeg','jpg'] else 'PNG'
+                            square.save(square_buffer, format=save_format)
+                            square_buffer.seek(0)
+                            archive.writestr(f"radar{str(i*num_squares_side+j_idx).zfill(2)}.{save_format.lower()}", square_buffer.getvalue())
+                zip_buffer.seek(0); zip_buffer.name = f'{r}_radar.zip'
+                await y.delete()
+                await t_client.send_file(message.chat.id, zip_buffer, caption=f'<b>⚡️Ваша карта готова!</b>', parse_mode='HTML')
+
+        elif '/remap' in caption:
+            if not message.document.file_name.lower().endswith('.zip'):
+                await message.answer("Пожалуйста, загрузите .zip файл."); return
+            y = await message.answer("Восстанавливаю изображение...")
+            work_dir = Path(f'work/work_MAP/{r}')
+            await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
+            download_path = work_dir / file_name
+            await p_app.download_media(message.document.file_id, file_name=download_path)
+            images_dict = {}
+            num_squares_side = 14
+            total_squares = num_squares_side * num_squares_side
+            with zipfile.ZipFile(download_path, 'r') as archive:
+                for zipinfo in archive.infolist():
+                    fn = zipinfo.filename
+                    if fn.startswith('radar') and (fn.endswith('.jpg') or fn.endswith('.jpeg') or fn.endswith('.png')):
+                        index = int(fn[5:-4].replace(".",""))
+                        with archive.open(zipinfo) as fiz: images_dict[index] = Image.open(io.BytesIO(fiz.read()))
+            if len(images_dict) != total_squares:
+                await y.delete(); await message.answer(f"Найдено только {len(images_dict)} из {total_squares} частей."); return
+            first_image = next(iter(images_dict.values()))
+            sq_w, sq_h = first_image.size
+            restored_img = Image.new('RGBA', (sq_w * num_squares_side, sq_h * num_squares_side))
+            for idx in range(total_squares):
+                i, j_idx = idx // num_squares_side, idx % num_squares_side
+                restored_img.paste(images_dict[idx], (j_idx*sq_w, i*sq_h))
+            jjj = f'work/work_MAP/{r}/restored_radar.png'
+            restored_img.save(jjj, format='PNG', quality=95)
             await y.delete()
-            await t_client.send_file(message.chat.id, f'work/work_COL/{r}/{file_name2}.ani',
-                                     caption='Держи файл!')
-            os.removedirs(f'work/work_COL/{r}')
-        elif file_format == "bpc":
-            await send_log(message, "файл", "Обработка BPC")
+            await t_client.send_file(message.chat.id, jjj, caption=f'<b>⚡️Восстановленное изображение готово!</b>', parse_mode=enums.ParseMode.HTML, force_document=True)
+
+        elif '/hudcut' in caption:
+            if file_format not in ["png", "jpg", "jpeg"]:
+                await message.answer(f"❔ Неподдерживаемый формат: .{file_format}"); return
+            processing_message = await message.answer("Обрабатываю...")
+            try:
+                src_dir = Path(f'work/work_HUD/{r}')
+                await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
+                download_path = src_dir / file_name
+                await p_app.download_media(message.document, download_path)
+                zip_buffer, count = await asyncio.to_thread(process_image_sync, download_path)
+                zip_buffer.seek(0); zip_buffer.name = f'{r}_hudcut.zip'
+                await t_client.send_file(message.chat.id, zip_buffer, caption=f'<b>⚡️Нарезаный худ готов!</b>', parse_mode="HTML", force_document=True)
+            except Exception as e: logging.exception("Ошибка hudcut")
+            finally: await processing_message.delete()
+
+        elif '/rehud' in caption:
+            if not message.document.file_name.lower().endswith('.zip'):
+                await message.answer("Пожалуйста, загрузите .zip файл."); return
+            y = await message.answer("Восстанавливаю изображение...")
+            work_dir = Path(f'work/work_HUD/{r}')
+            await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
+            download_path = work_dir / file_name
+            await p_app.download_media(message.document.file_id, file_name=download_path)
+            await asyncio.to_thread(assemble_image_from_zip_bytes, download_path, f'work/work_HUD/{r}/rehud_{r}.png')
+            await y.delete()
+            await t_client.send_file(message.chat.id, f'work/work_HUD/{r}/rehud_{r}.png', caption=f'<b>⚡️Восстановленное изображение готово!</b>', parse_mode=enums.ParseMode.HTML, force_document=True)
+
+        elif '/genrl' in caption:
+            work_dir = Path(f'work/work_BPC/{r}')
+            work_dir.mkdir(parents=True, exist_ok=True)
+            y = await message.answer("<b>⏳ Обрабатываю...</b>", parse_mode="HTML")
+            download_path = work_dir / file_name
+            bpcmeta_path = work_dir / f'{r}_GENERIC.bpcmeta'
+            try:
+                await p_app.download_media(message.document.file_id, file_name=str(download_path))
+                genrl_target = str(download_path)
+                if not zipfile.is_zipfile(str(download_path)):
+                    raw = read_file_bytes(str(download_path))
+                    xor_key = detect_key_pattern(raw)
+                    dec = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
+                    dec_path = work_dir / (Path(file_name).stem + '_dec.zip')
+                    dec_path.write_bytes(bytes(dec))
+                    if not zipfile.is_zipfile(str(dec_path)): raise ValueError("Файл не является zip-архивом.")
+                    genrl_target = str(dec_path)
+                generate_bpcmeta(genrl_target, str(bpcmeta_path))
+                await y.delete()
+                await t_client.send_file(message.chat.id, str(bpcmeta_path), caption='<b>⚡️Твой генрл готов!</b>', parse_mode='html', force_document=True)
+            except Exception as e: await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
+            finally: shutil.rmtree(work_dir, ignore_errors=True)
+            return
+
+        elif "/bpc" in caption:
             file_name = message.document.file_name
             temp_dir = os.path.join(f"work/work_BPC/{r}")
             os.makedirs(temp_dir, exist_ok=True)
             await p_app.download_media(message.document.file_id, file_name=f'work/work_BPC/{r}/{file_name}')
-            await process_bpc_file(file_name, message, r, temp_dir)
-        elif file_format == "txd":
-            txd_converter = TXDConverter()
-            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
+            await process_zip_file(file_name, message, r, temp_dir)
+            return
+
+        elif "/nri" in caption:
+            y = await message.answer(f"<b>⏳ Обрабатываю...</b>", parse_mode="HTML", force_document=True)
+            file_name = message.document.file_name
+            temp_dir = f"work/work_Z2N/{r}"
+            os.makedirs(temp_dir, exist_ok=True)
+            await p_app.download_media(message.document.file_id, file_name=f'work/work_Z2N/{r}/{file_name}')
+            i_result = convert_zip2nonerai(f'work/work_Z2N/{r}/{file_name}', temp_dir)
+            await y.delete()
+            await t_client.send_file(message.chat.id, i_result, caption='<b>⚡️Твоя сборка готова!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(temp_dir)
+            return
+
+        elif '/merger' in caption:
+            parts = caption.split()
+            if len(parts) < 2:
+                await message.answer("❔ Формат: /merger <имя_текстуры>"); return
+            target_name = parts[1]
+            if file_format not in ('zip', 'bpc'):
+                await message.answer("❔ Загрузите .zip или .bpc архив."); return
+            y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
+            work_dir = Path(f'work/work_BPC/{r}')
+            work_dir.mkdir(parents=True, exist_ok=True)
+            download_path = work_dir / file_name
             try:
-                src_dir = Path(f'work/work_COL/{r}')
-                os.mkdir(src_dir)
-                await asyncio.to_thread(os.makedirs, src_dir, exist_ok=True)
+                await p_app.download_media(message.document.file_id, file_name=download_path)
+                raw = read_file_bytes(str(download_path))
+                if file_format == 'bpc':
+                    xor_key = detect_key_pattern(raw)
+                    raw = bytearray(b ^ xor_key[i % len(xor_key)] for i, b in enumerate(raw))
+                with zipfile.ZipFile(io.BytesIO(bytes(raw)), 'r') as zf:
+                    names_in_zip = [Path(n).stem for n in zf.namelist() if not n.endswith('/') and not n.startswith('__MACOSX')]
+                merger_data = {target_name: names_in_zip}
+                merger_path = work_dir / f'Merger_{r}.json'
+                with open(merger_path, 'w', encoding='utf-8') as f: json.dump(merger_data, f, indent=4, ensure_ascii=False)
+                await y.delete()
+                await t_client.send_file(message.chat.id, str(merger_path), caption=f'<b>⚡️Merger.json готов!</b>\n📄 Файлов: {len(names_in_zip)}', parse_mode="HTML", force_document=True)
+            except Exception as e: await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
+            finally: shutil.rmtree(work_dir, ignore_errors=True)
+            return
+
+        elif '/index' in caption:
+            y = await message.answer("⏳<b>Индексирую...</b>", parse_mode="HTML")
+            work_dir = Path(f'work/work_BPC/{r}')
+            work_dir.mkdir(parents=True, exist_ok=True)
+            download_path = work_dir / file_name
+            try:
+                await p_app.download_media(message.document.file_id, file_name=download_path)
+                raw = read_file_bytes(str(download_path))
+                out_zip_buf = io.BytesIO()
+                with zipfile.ZipFile(io.BytesIO(bytes(raw)), 'r') as zf_in:
+                    with zipfile.ZipFile(out_zip_buf, 'w', zipfile.ZIP_STORED) as zf_out:
+                        for info in zf_in.infolist():
+                            if info.is_dir() or info.filename.startswith('__MACOSX'): continue
+                            data = zf_in.read(info.filename)
+                            zf_out.writestr(info.filename, data[:136])
+                out_zip_buf.seek(0)
+                out_name = Path(file_name).stem + '.tmb'
+                out_zip_buf.name = out_name
+                await y.delete()
+                await t_client.send_file(message.chat.id, out_zip_buf, caption=f'<b>⚡️Индекс готов!</b>\n📦 {out_name}', parse_mode="HTML", force_document=True)
+            except Exception as e: await y.edit_text(f"<b>❌ Ошибка: {e}</b>", parse_mode="HTML")
+            finally: shutil.rmtree(work_dir, ignore_errors=True)
+            return
+
+        elif '/ptk' in caption:
+            y = await message.answer(f"<b>⏳ Обрабатываю...</b>", parse_mode="HTML")
+            work_dir = Path(f'work/work_COLOR/{r}')
+            await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
+            download_path = work_dir / file_name
+            await p_app.download_media(message.document.file_id, file_name=download_path)
+            o = await create_palette_image(str(download_path), file_name, n_colors=10, output_file=str(work_dir / 'palette.png'))
+            await y.delete()
+            await t_client.send_file(message.chat.id, str(work_dir / 'palette.png'), caption=f'<b>⚡️{o}</b>', parse_mode="HTML")
+            shutil.rmtree(work_dir)
+            return
+
+        elif '/overlay' in caption:
+            if len(message.caption.split()) < 3:
+                await message.answer("❔ Формат: /overlay <mode> <alpha>\n\nМоды: multiply, screen, overlay, add, darker"); return
+            parts = caption.split()
+            mode = parts[1] if len(parts) > 1 else "normal"
+            alpha = int(parts[2]) if len(parts) > 2 else 100
+            if file_format not in ["jpeg", "jpg", "png", "zip"]:
+                return await message.answer("❌ Поддерживаются только изображения или архив!")
+            src_dir = Path(f'work/work_OVERLAY/{r}')
+            os.makedirs(src_dir, exist_ok=True)
+            download_path = src_dir / file_name
+            await p_app.download_media(message.document, file_name=str(download_path))
+            await state.update_data(base_path=str(download_path), mode=mode, alpha=alpha, original_name=file_name)
+            await state.set_state(OverlayStates.waiting_for_second_image)
+            await message.answer(f"<b>✅ Первый файл получен!</b>\nРежим: <code>{mode}</code>\nПрозрачность: <code>{alpha}%</code>\n\nТеперь пришли <b>второй файл</b>.", parse_mode="HTML")
+            return
+
+        if current_state == OverlayStates.waiting_for_second_image:
+            second_ext = file_name.split('.')[-1].lower()
+            second_path = Path(f"work/work_OVERLAY/overlay_src_{r}.{second_ext}")
+            data = await state.get_data()
+            y = await message.answer(f"<b>⏳ Начинаю обработку...</b>", parse_mode="HTML")
+            await p_app.download_media(message.document, file_name=str(second_path))
+            if data['original_name'].lower().endswith('.zip'):
+                result_buffer = await asyncio.to_thread(_process_zip_overlay, data['base_path'], str(second_path), data['mode'], data['alpha'])
+                out_filename = f"processed_{r}.zip"
+            else:
+                processed_bytes = await asyncio.to_thread(_process_overlay_logic, data['base_path'], str(second_path), data['mode'], data['alpha'])
+                result_buffer = io.BytesIO(processed_bytes)
+                out_filename = f"result_{data['original_name']}"
+            result_buffer.name = out_filename; result_buffer.seek(0)
+            await t_client.send_file(message.chat.id, result_buffer, caption='<b>⚡️ Готово!</b>', parse_mode="HTML", force_document=True)
+            await y.delete(); await state.clear()
+            return
+
+        else:
+            # Автоматическая обработка по типу файла (без подписи)
+            if file_format == "ifp":
+                src_dir = Path(f'work/work_ANI/{r}')
+                os.makedirs(src_dir, exist_ok=True)
                 download_path = src_dir / file_name
                 await p_app.download_media(message.document, download_path)
-                with open(download_path, 'rb') as f:
-                    data = f.read()
-                png_files = txd_converter.parse_txd_data(data)
-                if not png_files:
-                    await y.edit_text(f"<b>Не удалось извлечь текстуры из файла</b>")
-                    return
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                    for png_file in png_files:
-                        zip_file.write(png_file, os.path.basename(png_file))
-                zip_buffer.seek(0)
-                bio = io.BytesIO(zip_buffer)
-                bio.name = f"{os.path.splitext(message.document.file_name)[0]}.zip"
-                await t_client.send_file(message.chat.id, bio, caption=f'<b>⚡️Ваши файлы готовы!</b>',
-                                         parse_mode="HTML", force_document=True)
-            except Exception as e:
-                logging.error(f"TXD processing error: {e}", exc_info=True)
-            finally:
+                file_name2 = file_name.split(".")[0]
+                ani_file_path = f'work/work_ANI/{r}/{file_name2}.ani'
+                y = await message.answer("Обрабатываю...")
+                with open(download_path, 'rb') as f_input, open(ani_file_path, 'wb') as f_output:
+                    f_input.seek(8)
+                    byte = f_input.read(8)
+                    while byte: f_output.write(byte); byte = f_input.read(8)
+                async with aiofiles.open(ani_file_path, "rb") as f: original_data = await f.read()
+                new_data = b'\x41\x4E\x50\x33' + original_data
+                with open(ani_file_path, 'wb') as er: er.write(new_data)
                 await y.delete()
-        elif file_format == "mod":
-            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
-            file_name = message.document.file_name
-            file_name2 = file_name.split(".")[0]
-            download_path = Path(f'work/work_MOD/{r}')
-            file_down = f'work/work_MOD/{r}/{file_name}'
-            os.makedirs(download_path, exist_ok=True)
-            await p_app.download_media(message.document.file_id, file_name=file_down)
-            dff_file_path = f'work/work_MOD/{r}/{file_name2}.dff'
-            await convert_one(file_down, download_path)
-            await y.delete()
-            await t_client.send_file(message.chat.id,
-                                     dff_file_path, caption=f'<b>⚡️Ваша модель готова!</b>',
-                                     parse_mode="HTML", force_document=True)
+                await t_client.send_file(message.chat.id, f'work/work_ANI/{r}/{file_name2}.ani', caption=f'<b>⚡️Ваша анимация готова!</b>', parse_mode="HTML", force_document=True)
+                try: os.removedirs(f'work/work_ANI/{r}')
+                except: pass
 
-        elif file_format in ["btx", "png", "jpg", "jpeg", "zip"]:
-            work_dir = Path(f'work/work_BTX/{r}')
-            file_name = message.document.file_name
-            file_name2 = Path(file_name).stem
-            os.makedirs(work_dir, exist_ok=True)
-            src_path = work_dir / file_name
-
-            s = btx_user_settings.get(message.from_user.id, {})
-            bw, bh  = s.get("block", BTX_DEFAULT_BLOCK)
-            quality = s.get("quality", BTX_DEFAULT_QUALITY)
-
-            await send_log(message, "файл", f"Формат: {file_format.upper()} | ASTC {bw}x{bh} | quality={quality}")
-            await p_app.download_media(message.document.file_id, file_name=src_path)
-            y = await message.answer("⏳ Обрабатываю...")
-
-            try:
-                if file_format == "btx":
-                    output_file_path = await convert_btx_to_png(str(src_path), file_name, work_dir)
-                    if output_file_path:
-                        await y.delete()
-                        await bot.send_document(
-                            message.chat.id,
-                            FSInputFile(output_file_path),
-                            caption="<b>⚡️ Ваше изображение готово!</b>",
-                            parse_mode="HTML"
-                        )
-                    else:
-                        await y.edit_text("❌ Ошибка при конвертации BTX → PNG")
-
-                elif file_format in ("png", "jpg", "jpeg"):
-                    output_file_path = await convert_png_to_btx(str(src_path), file_name, work_dir, bw, bh, quality)
-                    if output_file_path:
-                        await y.delete()
-                        await bot.send_document(
-                            message.chat.id,
-                            FSInputFile(output_file_path),
-                            caption=(
-                                f"<b>⚡️ Ваш файл готов!</b>\n"
-                                f"🔧 ASTC <code>{bw}x{bh}</code> | quality: <code>{s.get('quality_name','medium')}</code>"
-                            ),
-                            parse_mode="HTML"
-                        )
-                    else:
-                        await y.edit_text("❌ Ошибка при конвертации PNG → BTX")
-
-                elif file_format == "zip":
-                    out_zip_path = work_dir / f'{r}_result.zip'
-                    tasks = []
-                    files_to_process = [
-                        f for f in work_dir.iterdir()
-                        if f.is_file() and f.name != file_name
-                    ]
-                    with zipfile.ZipFile(src_path, 'r') as zin:
-                        zin.extractall(work_dir)
-
-                    files_to_process = [
-                        f for f in work_dir.iterdir()
-                        if f.is_file() and f.name != file_name and f.suffix.lower() in ('.png', '.jpg', '.jpeg', '.btx')
-                    ]
-
-                    async def _process_one(f: Path):
-                        if f.suffix.lower() == ".btx":
-                            return await convert_btx_to_png(str(f), f.name, work_dir)
-                        else:
-                            return await convert_png_to_btx(str(f), f.name, work_dir, bw, bh, quality)
-
-                    results = await asyncio.gather(*[_process_one(f) for f in files_to_process], return_exceptions=True)
-
-                    with zipfile.ZipFile(out_zip_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-                        for res in results:
-                            if isinstance(res, Path) and res and res.exists():
-                                zout.write(res, res.name)
-
+            elif file_format == "json":
+                work_dir = Path(f'work/temp_downloads/{r}')
+                await asyncio.to_thread(os.makedirs, work_dir, exist_ok=True)
+                src = os.path.join(work_dir, file_name)
+                download_path = work_dir / file_name
+                try:
+                    await p_app.download_media(message.document.file_id, file_name=download_path)
+                    y = await message.answer("Обрабатываю...")
+                    i_result = await asyncio.get_running_loop().run_in_executor(None, process_json_file, src)
                     await y.delete()
-                    await bot.send_document(
-                        message.chat.id,
-                        FSInputFile(out_zip_path),
-                        caption=(
-                            f"<b>⚡️ Ваш архив готов!</b>\n"
-                            f"🔧 ASTC <code>{bw}x{bh}</code> | quality: <code>{s.get('quality_name','medium')}</code>\n"
-                            f"📦 Обработано файлов: <code>{len([r for r in results if isinstance(r, Path) and r])}</code>"
-                        ),
-                        parse_mode="HTML"
-                    )
-            except Exception as e:
-                logging.error(f"BTX handler error: {e}", exc_info=True)
-                await y.edit_text("❌ Произошла ошибка при обработке файла")
-        elif file_format == "dat":
-            y = await message.answer(f"<b>⏳ Обрабатываю ваш файл...</b>", parse_mode="HTML", force_document=True)
-            try:
+                    await message.answer(str(i_result))
+                except Exception as e: await message.answer(f"Ошибка: {e}")
+                finally:
+                    if os.path.exists(work_dir): shutil.rmtree(work_dir)
+
+            elif file_format == "cls":
+                src_dir = Path(f'work/work_COL/{r}')
+                os.makedirs(src_dir, exist_ok=True)
+                download_path = src_dir / file_name
+                await p_app.download_media(message.document, download_path)
+                file_name2 = file_name.split(".")[0]
+                ani_file_path = f'work/work_COL/{r}/{file_name2}.col'
+                y = await message.answer("Обрабатываю...")
+                with open(download_path, 'rb') as f_input, open(ani_file_path, 'wb') as f_output:
+                    f_input.seek(4)
+                    byte = f_input.read(4)
+                    while byte: f_output.write(byte); byte = f_input.read(4)
+                async with aiofiles.open(ani_file_path, "rb") as f: original_data = await f.read()
+                new_data = b'\x43\x4F\x4C\x33' + original_data
+                with open(ani_file_path, 'wb') as er: er.write(new_data)
+                await y.delete()
+                await t_client.send_file(message.chat.id, ani_file_path, caption='Держи файл!')
+                try: os.removedirs(f'work/work_COL/{r}')
+                except: pass
+
+            elif file_format == "bpc":
+                await send_log(message, "файл", "Обработка BPC")
+                file_name = message.document.file_name
+                temp_dir = os.path.join(f"work/work_BPC/{r}")
+                os.makedirs(temp_dir, exist_ok=True)
+                await p_app.download_media(message.document.file_id, file_name=f'work/work_BPC/{r}/{file_name}')
+                await process_bpc_file(file_name, message, r, temp_dir)
+
+            elif file_format == "txd":
+                txd_converter = TXDConverter()
+                y = await message.answer(f"<b>⏳ Обрабатываю...</b>", parse_mode="HTML")
+                try:
+                    src_dir = Path(f'work/work_COL/{r}')
+                    os.makedirs(src_dir, exist_ok=True)
+                    download_path = src_dir / file_name
+                    await p_app.download_media(message.document, download_path)
+                    with open(download_path, 'rb') as f: data = f.read()
+                    png_files = txd_converter.parse_txd_data(data)
+                    if not png_files:
+                        await y.edit_text("<b>Не удалось извлечь текстуры</b>"); return
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        for png_file in png_files: zip_file.write(png_file, os.path.basename(png_file))
+                    zip_buffer.seek(0)
+                    bio = io.BytesIO(zip_buffer.getvalue()); bio.name = f"{Path(message.document.file_name).stem}.zip"
+                    await t_client.send_file(message.chat.id, bio, caption=f'<b>⚡️Ваши файлы готовы!</b>', parse_mode="HTML", force_document=True)
+                except Exception as e: logging.error(f"TXD processing error: {e}", exc_info=True)
+                finally: await y.delete()
+
+            elif file_format == "mod":
+                y = await message.answer(f"<b>⏳ Обрабатываю...</b>", parse_mode="HTML")
                 file_name = message.document.file_name
                 file_name2 = file_name.split(".")[0]
-                temp = f'work/work_MOD/{r}'
-                os.makedirs(temp, exist_ok=True)
-                await p_app.download_media(message.document.file_id, file_name=temp)
-                json_file_path = f'work/work_MOD/{r}/{file_name2}.json'
-                json = await convert_timecyc_dat_to_json(json_file_path, file_name, temp)
-                await t_client.send_file(message.chat.id, json_file_path,
-                                         caption=f'<b>⚡️Ваша модель готова!</b>', parse_mode="HTML",
-                                         force_document=True)
-            except Exception as e:
-                logging.error(f"TXD processing error: {e}", exc_info=True)
-            finally:
+                download_path = Path(f'work/work_MOD/{r}')
+                file_down = f'work/work_MOD/{r}/{file_name}'
+                os.makedirs(download_path, exist_ok=True)
+                await p_app.download_media(message.document.file_id, file_name=file_down)
+                await convert_one(file_down, str(download_path))
                 await y.delete()
+                await t_client.send_file(message.chat.id, f'work/work_MOD/{r}/{file_name2}.dff', caption=f'<b>⚡️Ваша модель готова!</b>', parse_mode="HTML", force_document=True)
 
+            elif file_format in ["btx", "png", "jpg", "jpeg", "zip"]:
+                work_dir = Path(f'work/work_BTX/{r}')
+                file_name = message.document.file_name
+                file_name2 = Path(file_name).stem
+                os.makedirs(work_dir, exist_ok=True)
+                src_path = work_dir / file_name
+                s = btx_user_settings.get(user_id, {})
+                bw, bh = s.get("block", BTX_DEFAULT_BLOCK)
+                quality = s.get("quality", BTX_DEFAULT_QUALITY)
+                await send_log(message, "файл", f"Формат: {file_format.upper()} | ASTC {bw}x{bh} | quality={quality}")
+                y = await message.answer(f"<b>⏳ Обрабатываю {file_format.upper()}...</b>", parse_mode="HTML")
+                try:
+                    await p_app.download_media(message.document, file_name=src_path)
+                    if file_format == "btx":
+                        out_png = await convert_btx_to_png(src_path, file_name, work_dir)
+                        if out_png and out_png.exists():
+                            await y.delete()
+                            await t_client.send_file(message.chat.id, str(out_png), caption=f'<b>⚡️{file_name2}.png готов!</b>', parse_mode="HTML", force_document=True)
+                        else:
+                            await y.edit_text("<b>Не удалось конвертировать BTX → PNG</b>", parse_mode="HTML")
+                    elif file_format in ["png", "jpg", "jpeg"]:
+                        out_btx = await convert_png_to_btx(src_path, file_name, work_dir, bw, bh, quality)
+                        if out_btx and out_btx.exists():
+                            await y.delete()
+                            await t_client.send_file(message.chat.id, str(out_btx), caption=f'<b>⚡️{file_name2}.btx готов!</b>\n🔷 Блок: {bw}x{bh} | ⚙️ Качество: {s.get("quality_name","medium")}', parse_mode="HTML", force_document=True)
+                        else:
+                            await y.edit_text("<b>Не удалось конвертировать PNG → BTX</b>", parse_mode="HTML")
+                    elif file_format == "zip":
+                        out_btx_dir = work_dir / "btx_out"
+                        out_btx_dir.mkdir(exist_ok=True)
+                        out_zip_path = work_dir / f"{file_name2}_btx.zip"
+                        with zipfile.ZipFile(src_path, 'r') as src_zip:
+                            png_list = [n for n in src_zip.namelist() if n.lower().endswith(('.png','.jpg','.jpeg'))]
+                        converted_count = 0
+                        with zipfile.ZipFile(out_zip_path, 'w', zipfile.ZIP_STORED) as out_zip:
+                            with zipfile.ZipFile(src_path, 'r') as src_zip:
+                                for fname in src_zip.namelist():
+                                    if fname.lower().endswith(('.png','.jpg','.jpeg')):
+                                        img_bytes = src_zip.read(fname)
+                                        img = Image.open(io.BytesIO(img_bytes))
+                                        btx_bytes = await asyncio.to_thread(_compress_to_btx_bytes, img, bw, bh, quality)
+                                        stem = Path(fname).stem
+                                        out_zip.writestr(stem + '.btx', btx_bytes)
+                                        converted_count += 1
+                                    elif fname.lower().endswith('.btx'):
+                                        raw = src_zip.read(fname)
+                                        img = await asyncio.to_thread(_decompress_from_btx_bytes, raw)
+                                        buf = io.BytesIO(); img.save(buf, format='PNG')
+                                        out_zip.writestr(Path(fname).stem + '.png', buf.getvalue())
+                                        converted_count += 1
+                                    else:
+                                        out_zip.writestr(fname, src_zip.read(fname))
+                        await y.delete()
+                        await t_client.send_file(message.chat.id, str(out_zip_path), caption=(
+                            f'<b>⚡️ZIP конвертирован!</b>\n🔄 Файлов обработано: {converted_count}\n'
+                            f'🔷 Блок: {bw}x{bh} | ⚙️ Качество: {s.get("quality_name","medium")}'), parse_mode="HTML", force_document=True)
+                except Exception as e:
+                    logging.error(f"BTX handler error: {e}", exc_info=True)
+                    await y.edit_text("❌ Произошла ошибка при обработке файла")
 
+            elif file_format == "dat":
+                y = await message.answer(f"<b>⏳ Обрабатываю...</b>", parse_mode="HTML")
+                try:
+                    file_name = message.document.file_name
+                    file_name2 = file_name.split(".")[0]
+                    temp = f'work/work_MOD/{r}'
+                    os.makedirs(temp, exist_ok=True)
+                    await p_app.download_media(message.document.file_id, file_name=temp)
+                    json_file_path = f'work/work_MOD/{r}/{file_name2}.json'
+                    json_result = await convert_timecyc_dat_to_json(json_file_path, file_name, temp)
+                    await t_client.send_file(message.chat.id, json_file_path, caption=f'<b>⚡️Ваш файл готов!</b>', parse_mode="HTML", force_document=True)
+                except Exception as e: logging.error(f"DAT processing error: {e}", exc_info=True)
+                finally: await y.delete()
 
+    finally:
+        await queue_release(is_subscribed)
+
+# ── Медиа-хендлеры ────────────────────────────────────────────────────
 @dp.message(F.photo)
-async def handle_photo(message: types.Message):
-    await send_log(message, "фото")
+async def handle_photo(message: types.Message): await send_log(message, "фото")
 
 @dp.message(F.sticker)
-async def handle_sticker(message: types.Message):
-    await send_log(message, "стикер")
+async def handle_sticker(message: types.Message): await send_log(message, "стикер")
 
 @dp.message(F.animation)
-async def handle_animation(message: types.Message):
-    await send_log(message, "гифка")
+async def handle_animation(message: types.Message): await send_log(message, "гифка")
 
 @dp.message(F.video)
-async def handle_video(message: types.Message):
-    await send_log(message, "видео")
+async def handle_video(message: types.Message): await send_log(message, "видео")
 
 @dp.message(F.voice)
-async def handle_voice(message: types.Message):
-    await send_log(message, "голосовое")
+async def handle_voice(message: types.Message): await send_log(message, "голосовое")
 
 @dp.message(F.audio)
-async def handle_audio(message: types.Message):
-    await send_log(message, "аудио")
+async def handle_audio(message: types.Message): await send_log(message, "аудио")
 
 @dp.message(F.video_note)
-async def handle_video_note(message: types.Message):
-    await send_log(message, "видео-сообщение")
+async def handle_video_note(message: types.Message): await send_log(message, "видео-сообщение")
 
 @dp.message(F.contact)
-async def handle_contact(message: types.Message):
-    await send_log(message, "контакт")
+async def handle_contact(message: types.Message): await send_log(message, "контакт")
 
 @dp.message(F.location)
-async def handle_location(message: types.Message):
-    await send_log(message, "геолокация")
+async def handle_location(message: types.Message): await send_log(message, "геолокация")
 
 @dp.message(F.poll)
-async def handle_poll(message: types.Message):
-    await send_log(message, "опрос", f"Вопрос: {message.poll.question}")
+async def handle_poll(message: types.Message): await send_log(message, "опрос", f"Вопрос: {message.poll.question}")
 
 @dp.message(F.story)
-async def handle_story(message: types.Message):
-    await send_log(message, "история")
+async def handle_story(message: types.Message): await send_log(message, "история")
 
-
+# ── Текстовые команды ─────────────────────────────────────────────────
 @dp.message(F.text)
 async def ok(message: types.Message):
     user_id = message.from_user.id
-    username = message.from_user.username
+    username = message.from_user.username or f"user_{user_id}"
+
+    # Антиспам
+    allowed, blocked_until = check_antispam(user_id)
+    if not allowed:
+        secs = max(0, int(blocked_until - time.time()))
+        await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
+
+    # Бан
+    banned_flag, ban_reason = is_banned(user_id)
+    if banned_flag:
+        await message.answer(f"🚫 Вы заблокированы. Причина: {ban_reason or '—'}"); return
+
     await send_log(message, "текст")
     sub, message_to_send = await update(user_id, username)
     if sub:
-        await message.answer(message_to_send)
-        return
-    is_subscribed, expiry_date_value = await get_user_status_async(message.from_user.id)
-    if not is_subscribed:
-        await message.answer(NOT_HI_MESSAGE)
-        return
+        await message.answer(message_to_send); return
+
+    is_subscribed, expiry_date_value = await get_user_status_async(user_id)
+    inc_msg_count(user_id)
+
     j = message.text.split()
+
+    # /start
     if "/start" in message.text:
-        builder = InlineKeyboardBuilder()
-        builder.row(
-            types.InlineKeyboardButton(text="Открыть палитру HEX", web_app=types.WebAppInfo(url="https://csscolor.ru")))
-        hello = f'<b>👋Привет это бот для создания сборок!</b>\n\n💳Твоя подписка все еще действует до {expiry_date_value}!\n\nКоманды - /help'
-        await message.answer(hello, reply_markup=builder.as_markup(), parse_mode='HTML')
+        if is_subscribed:
+            b = InlineKeyboardBuilder()
+            b.button(text="🔧 Открыть палитру HEX", web_app=types.WebAppInfo(url="https://csscolor.ru"))
+            await message.answer(start_paid_text(expiry_date_value or "—"), reply_markup=b.as_markup(), parse_mode='HTML')
+        else:
+            await message.answer(start_free_text(), reply_markup=kb_subscription_plans(), parse_mode='HTML')
+        return
+
+    # /mysub
     if "/mysub" in message.text:
-        hello = f'<b>💳Твоя подписка все еще действует до {expiry_date_value}!</b>'
-        await message.answer(hello, parse_mode='HTML')
-    if '/hud1' in message.text.split():
-        y = await message.answer("Обрабатываю...")
+        if is_subscribed:
+            forever = expiry_date_value == "31.12.2099"
+            until = "♾️ бессрочно" if forever else f"до <b>{expiry_date_value}</b>"
+            await message.answer(f"💎 <b>Premium активен</b> — {until}", parse_mode="HTML")
+        else:
+            await message.answer("❌ <b>У вас нет Premium-подписки</b>\n\nКупить: /start", reply_markup=kb_subscription_plans(), parse_mode="HTML")
+        return
+
+    # /top
+    if "/top" in message.text:
+        rows = get_top_users(10)
+        medals = ["🥇","🥈","🥉"]+["🔸"]*7
+        lines = ["🏆 <b>Топ-10 активных пользователей:</b>\n"]
+        for i, (uid, uname, cnt) in enumerate(rows):
+            name = f"@{uname}" if uname else f"ID:{uid}"
+            lines.append(f"{medals[i]} {i+1}. {name} — <b>{cnt}</b> действий")
+        await message.answer("\n".join(lines), parse_mode="HTML"); return
+
+    # /admin
+    if "/admin" in message.text:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
+        row = c.fetchone(); conn.close()
+        if not (row and row[0] == 'True'):
+            await message.answer("❌ Нет прав."); return
+        s = get_bot_stats()
+        text = (f"🛠 <b>Панель администратора</b>\n\n"
+                f"👥 Всего пользователей: <b>{s['total']}</b>\n"
+                f"💎 Premium: <b>{s['paid']}</b>\n"
+                f"🆓 Бесплатных: <b>{s['free']}</b>\n"
+                f"🚫 Заблокировано: <b>{s['banned']}</b>\n"
+                f"📅 Активно сегодня: <b>{s['today']}</b>\n"
+                f"💾 Work-папка: <b>{get_work_size_gb():.2f} ГБ</b>")
+        await message.answer(text, reply_markup=kb_admin_main(), parse_mode="HTML"); return
+
+    # /addchannel
+    if message.text.startswith("/addchannel"):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
+        row = c.fetchone(); conn.close()
+        if not (row and row[0] == 'True'):
+            await message.answer("❌ Нет прав."); return
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("Использование: /addchannel @username"); return
+        ch = parts[1] if parts[1].startswith("@") else "@" + parts[1]
+        add_channel(ch)
+        await message.answer(f"✅ Канал {ch} добавлен в обязательные."); return
+
+    # /delchannel
+    if message.text.startswith("/delchannel"):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
+        row = c.fetchone(); conn.close()
+        if not (row and row[0] == 'True'):
+            await message.answer("❌ Нет прав."); return
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("Использование: /delchannel @username"); return
+        ch = parts[1] if parts[1].startswith("@") else "@" + parts[1]
+        ok_del = remove_channel(ch)
+        await message.answer(f"{'✅ Удалён' if ok_del else '❌ Не найден'}: {ch}"); return
+
+    # /ban
+    if message.text.startswith("/ban "):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
+        row = c.fetchone(); conn.close()
+        if not (row and row[0] == 'True'):
+            await message.answer("❌ Нет прав."); return
+        parts = message.text.split(maxsplit=2)
         try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /hud1 <color> <alpha>\nПример использования: /hud1 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
+            uid = int(parts[1])
+            reason = parts[2] if len(parts) > 2 else "Нарушение правил"
+            ban_user(uid, reason)
+            await message.answer(f"🚫 Пользователь <code>{uid}</code> заблокирован.\nПричина: {reason}", parse_mode="HTML")
+        except (ValueError, IndexError): await message.answer("❌ Неверный ID")
+        return
+
+    # /unban
+    if message.text.startswith("/unban "):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
+        row = c.fetchone(); conn.close()
+        if not (row and row[0] == 'True'):
+            await message.answer("❌ Нет прав."); return
+        parts = message.text.split()
         try:
-            alpha = float(message.text.split()[2])
+            uid = int(parts[1])
+            unban_user(uid)
+            await message.answer(f"✅ Пользователь <code>{uid}</code> разбанен.", parse_mode="HTML")
+        except (ValueError, IndexError): await message.answer("❌ Неверный ID")
+        return
+
+    # /givesub
+    if message.text.startswith("/givesub"):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
+        row = c.fetchone(); conn.close()
+        if not (row and row[0] == 'True'):
+            await message.answer("❌ Нет прав."); return
+        parts = message.text.split()
+        if len(parts) < 3:
+            await message.answer("Использование: /givesub <id> <days>\n-1 = навсегда"); return
+        try:
+            uid = int(parts[1]); days = int(parts[2])
+            expiry = grant_subscription(uid, days)
+            await message.answer(f"✅ Подписка выдана <code>{uid}</code> до <b>{expiry}</b>", parse_mode="HTML")
+        except ValueError: await message.answer("❌ Неверные параметры")
+        return
+
+    # Для free-пользователей: проверка подписки на каналы
+    if not is_subscribed:
+        info_cmds = ["/top", "/help", "/start", "/mysub", "/admin"]
+        if not any(cmd in message.text for cmd in info_cmds):
+            not_sub = await check_required_subs(user_id)
+            if not_sub:
+                await message.answer(
+                    "🔔 <b>Подпишитесь на каналы:</b>\n\n" + "\n".join(f"• {ch}" for ch in not_sub) +
+                    "\n\nПосле подписки нажмите <b>✅ Проверить</b>",
+                    reply_markup=kb_check_channels(not_sub), parse_mode="HTML"); return
+
+    # Очередь для обрабатывающих команд
+    PROCESSING_CMDS = ['/hud', '/hp', '/blood', '/tree', '/vctree', '/kp', '/carmenu',
+                       '/speedometer', '/road', '/casino', '/pickup', '/timecyc', '/colorcyc',
+                       '/particle', '/genrl', '/merger', '/aitimecyc', '/weapon']
+    is_processing_cmd = any(cmd in message.text for cmd in PROCESSING_CMDS)
+    if is_processing_cmd:
+        if not is_subscribed:
+            queue_msg = await message.answer("⏳ <b>Ваш запрос в очереди...</b>", parse_mode="HTML")
+            await queue_acquire(False)
+            try: await queue_msg.delete()
+            except: pass
+        else:
+            await queue_acquire(True)
+        asyncio.create_task(auto_cleanup())
+
+    try:
+        if '/hud1' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /hud1 #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud1.zip", "hud1", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud1.zip", "hud1")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>',
-                                 parse_mode="HTML", force_document=True)
-        await asyncio.to_thread(shutil.rmtree, work_dir)
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>', parse_mode="HTML", force_document=True)
+            await asyncio.to_thread(shutil.rmtree, work_dir)
 
-    if '/hud2' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /hud2 <color> <alpha>\nПример использования: /hud2 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+        if '/hud2' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /hud2 #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud2.zip", "hud2", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud2.zip", "hud2")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>',
-                                 parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/hud3' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /hud3 <color> <alpha>\nПример использования: /hud3 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/hud3' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /hud3 #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud3.zip", "hud3", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud3.zip", "hud3")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>',
-                                 parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/hud4' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /hud4 <color> <alpha>\nПример использования: /hud4 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/hud4' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /hud4 #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud4.zip", "hud4", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/hud4.zip", "hud4")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>',
-                                 parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/hp1' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /hp1 <color> <alpha>\nПример использования: /hp1 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Hud готов!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/hp1' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /hp1 #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp1.zip", "hp1", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp1.zip", "hp1")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/hp2' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /hp2 <color> <alpha>\nПример использования: /hp2 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/hp2' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /hp2 #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp2.zip", "hp2", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp2.zip", "hp2")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/hp3' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /hp3 <color> <alpha>\nПример использования: /hp3 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/hp3' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /hp3 #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp3.zip", "hp3", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/hp3.zip", "hp3")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/blood' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /blood <color> <alpha>\nПример использования: /blood #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Элементы худа готовы!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/blood' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /blood #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/blood.zip", "blood", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/blood.zip", "blood")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваша кровь готова!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/tree' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /tree <color> <alpha>\nПример использования: /tree #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Ваша кровь готова!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/tree' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /tree #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/tree.zip", "tree", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/tree.zip", "tree")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/vctree' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /vctree <color> <alpha>\nПример использования: /vctree #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/vctree' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /vctree #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/vctree.zip", "vctree", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/vctree.zip", "vctree")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp1' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp1 <color> <alpha>\nПример использования: /kp1 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp1.zip", "kp1", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp1.zip", "kp1")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp2' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp2 <color> <alpha>\nПример использования: /kp2 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp2.zip", "kp2", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp2.zip", "kp2")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp3' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp3 <color> <alpha>\nПример использования: /kp3 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp3.zip", "kp3", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp3.zip", "kp3")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp4' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp4 <color> <alpha>\nПример использования: /kp4 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp4.zip", "kp4", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp4.zip", "kp4")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp5' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp5 <color> <alpha>\nПример использования: /kp5 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp5.zip", "kp5", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp5.zip", "kp5")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp6' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp6 <color> <alpha>\nПример использования: /kp6 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp6.zip", "kp6", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp6.zip", "kp6")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp7' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp7 <color> <alpha>\nПример использования: /kp7 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp7.zip", "kp7", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp7.zip", "kp7")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp8' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp8 <color> <alpha>\nПример использования: /kp8 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp8.zip", "kp8", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp8.zip", "kp8")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/kp9' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /kp9 <color> <alpha>\nПример использования: /kp9 #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp9.zip", "kp9", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/kp9.zip", "kp9")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/carmenu' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /carmenu <color> <alpha>\nПример использования: /carmenu #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Ваши деревья готовы!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        for kp_num in range(1, 10):
+            cmd = f'/kp{kp_num}'
+            if cmd in j:
+                y = await message.answer("Обрабатываю...")
+                try: hex_color = j[1]
+                except: await message.answer(f"❔ Пример: {cmd} #FF0000 0.4"); return
+                try: alpha = float(j[2])
+                except: alpha = 1.0
+                work_dir, output_zip_path = await color_optimized(hex_color, f"zip/kp{kp_num}.zip", f"kp{kp_num}", alpha)
+                await y.delete()
+                await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Ваши кнопки готовы!</b>', parse_mode="HTML", force_document=True)
+                shutil.rmtree(work_dir)
+
+        if '/carmenu' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /carmenu #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/carmenu.zip", "carmenu", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/carmenu.zip", "carmenu")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваше меню машины готово!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/speedometer' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /speedometer <color> <alpha>\nПример использования: /speedometer #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Ваше меню машины готово!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/speedometer' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /speedometer #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/speedometer.zip", "speedometer", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/speedometer.zip", "speedometer")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваш спидометр готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/road' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /road <color> <alpha>\nПример использования: /road #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Ваш спидометр готов!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/road' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /road #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/road.zip", "road", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/road.zip", "road")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Вари дороги готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/casino' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /casino <color> <alpha>\nПример использования: /casino #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Вари дороги готовы!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/casino' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /casino #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/casino.zip", "casino", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/casino.zip", "casino")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваш худ казино готов!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if '/pickup' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            hex_color = j[1]
-        except:
-            await message.answer(
-                "❔ Пример использования: /pickup <color> <alpha>\nПример использования: /pickup #FF0000 0.4\nЦвет должен быть в HEX(например, #RRGGBB)! P.S. альфа не обязательна")
-            return
-        try:
-            alpha = float(message.text.split()[2])
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Ваш худ казино готов!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if '/pickup' in j:
+            y = await message.answer("Обрабатываю...")
+            try: hex_color = j[1]
+            except: await message.answer("❔ Пример: /pickup #FF0000 0.4"); return
+            try: alpha = float(j[2])
+            except: alpha = 1.0
             work_dir, output_zip_path = await color_optimized(hex_color, "zip/pickup.zip", "pickup", alpha)
-        except:
-            work_dir, output_zip_path = await color_optimized(hex_color, "zip/pickup.zip", "pickup")
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_zip_path,
-                                 caption='<b>⚡️Ваши пикапы готовы!</b>', parse_mode="HTML", force_document=True)
-        shutil.rmtree(work_dir)
-    if "/edit" in message.text:
-        builder = InlineKeyboardBuilder()
-        builder.row(
-            types.InlineKeyboardButton(text="Открыть phohtoshop",
-                                       web_app=types.WebAppInfo(url="https://pixlr.com/ru/express/")))
-        await message.answer("<b>⚡️Держи редактор:</b>", reply_markup=builder.as_markup(), parse_mode='HTML')
-    if "/timecyc" in message.text and len(message.text.split()) >= 5:
-        y = await message.answer("Обрабатываю...")
-        output_file_path = await timecyc(j)
-        await y.delete()
-        await t_client.send_file(message.chat.id, output_file_path,
-                                 caption='<b>⚡️TimeCycle готов!</b>', parse_mode="HTML", force_document=True)
-        if os.path.exists(output_file_path):
-            os.remove(output_file_path)
-    elif "/timecyc" in message.text and len(message.text.split()) < 5:
-        await message.answer(
-            "❔ Пример использования: /timecyc SkyBottomRGB SkyTopRGB SunCoreRGB CloudRGB\nЗначение цветов /timecyc #НизНеба #ВерхНеба #Облака #Солнце\nВсе цвета должны быть в HEX(например, #RRGGBB)!")
-    elif "/colorcyc" in message.text and len(message.text.split()) >= 2:
-        y = await message.answer("Обрабатываю...")
-        if is_float(j[1]):
-            black = j[1]
-            grn1 = await colorcyc(black, black, black)
-        else:
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_zip_path, caption='<b>⚡️Ваши пикапы готовы!</b>', parse_mode="HTML", force_document=True)
+            shutil.rmtree(work_dir)
+
+        if "/edit" in message.text:
+            b2 = InlineKeyboardBuilder()
+            b2.row(types.InlineKeyboardButton(text="Открыть Photoshop", web_app=types.WebAppInfo(url="https://pixlr.com/ru/express/")))
+            await message.answer("<b>⚡️Держи редактор:</b>", reply_markup=b2.as_markup(), parse_mode='HTML')
+
+        if "/timecyc" in message.text and len(j) >= 5:
+            y = await message.answer("Обрабатываю...")
+            output_file_path = await timecyc(j)
+            await y.delete()
+            await t_client.send_file(message.chat.id, output_file_path, caption='<b>⚡️TimeCycle готов!</b>', parse_mode="HTML", force_document=True)
+            if os.path.exists(output_file_path): os.remove(output_file_path)
+        elif "/timecyc" in message.text and len(j) < 5:
+            await message.answer("❔ Пример: /timecyc #НизНеба #ВерхНеба #Облака #Солнце")
+
+        elif "/colorcyc" in message.text and len(j) >= 2:
+            y = await message.answer("Обрабатываю...")
+            if is_float(j[1]):
+                black = j[1]
+                grn1 = await colorcyc(black, black, black)
+            else:
+                hex_color = j[1]
+                r1, g1, b1 = ImageColor.getrgb(hex_color)
+                r_str, g_str, b_str = (str(round(c / 100, 3)) for c in [r1, g1, b1])
+                grn1 = await colorcyc(r_str, g_str, b_str)
+            await y.delete()
+            await t_client.send_file(user_id, grn1, caption='⚡️<b>Ваш colorcycle готов!</b>', parse_mode='HTML')
+            os.remove(grn1)
+        elif "/colorcyc" in message.text:
+            await message.answer("❔ Пример: /colorcyc 1.2 или /colorcyc #FF0000")
+
+        elif "/checkcolor" in message.text and len(j) >= 2:
+            y = await message.answer("Обрабатываю...")
             hex_color = j[1]
-            r1, g1, b1 = ImageColor.getrgb(hex_color)
-            r, g, b = (str(round(c / 100, 3)) for c in [r1, g1, b1])
-            grn1 = await colorcyc(r, g, b)
-        user_id = message.from_user.i
-        await y.delete()
-        await t_client.send_file(user_id, grn1, caption='⚡️<b>Ваш colorcycle готов!</b>',
-                                 parse_mode='HTML')
-        os.remove(grn1)
-    elif "/colorcyc" in message.text and len(message.text.split()) < 2:
-        await message.answer(
-            "❔ Неверный формат данных. Используйте: /colorcyc <color>\n\nПример использования: /colorcyc 1.2 или /colorcyc #FF0000")
-    elif "/checkcolor" in message.text and len(message.text.split()) >= 2:
-        y = await message.answer("Обрабатываю...")
-        hex_color = j[1]
-        image_path = await kvadratik(hex_color)
-        user_id = message.from_user.id
-        await y.delete()
-        await t_client.send_file(user_id, image_path, caption=f'🎨<b>Палитра цвета - {hex_color} </b>',
-                                 parse_mode="HTML")
-        os.remove(image_path)
-    elif "/checkcolor" in message.text and len(message.text.split()) < 2:
-        await message.answer(
-            "❔ Неверный формат данных. Используйте: /checkcolor <color>\n\nПример использования: /checkcolor #FF0000")
-    elif '/wpr' in message.text.split():
-      preset_arg = j[1]
-      if preset_arg not in PRESETS:
-          await message.answer(
-              "❔ Неверный пресет. Доступные:\n\n"
-              "1 — Стандартный\n"
-              "2 — ⚡ Ускор + Антик\n"
-              "3 — 🔄 Без перезарядки + Динамичный прицел\n"
-              "4 — 🎯 Без перезарядки + Статичный прицел\n\n"
-              "Пример: /weapon 2\n"
-              "Затем: /weapon <PT> <RAZB>"
-          )
-          return
-      weapon_user_settings[user_id] = preset_arg
-      preset = PRESETS[preset_arg]
-      await message.answer(f"✅ <b>Пресет weapon сохранён</b>\n"
-          f"🗂 {preset['name']}\n"
-          f"📄 {preset['desc']}\n\n"
-          f"Теперь отправь <b>/weapon &lt;PT&gt; &lt;RAZB&gt;</b> для генерации.", parse_mode="HTML")
-    elif '/weapon' in message.text.split() and len(j) >= 3:
-        try:
-            PT = int(j[1])
-            RAZB = int(j[2])
-        except (ValueError, IndexError):
-            await message.answer("❌ PT и RAZB должны быть числами.\nПример: /weapon 9 50")
-            return
-    
-        preset_id = weapon_user_settings.get(user_id, "1")
-        preset = PRESETS[preset_id]
-    
-        y = await message.answer("⏳ Обрабатываю...")
-        n = generate_random_string(8)
-        tmp_folder = f"work/work_weapon/{n}"
-        zip_path = f"work/work_weapon/{n}.zip"
-        try:
-            os.makedirs("work/work_weapon", exist_ok=True)
-            shutil.copytree(preset["folder"], tmp_folder)
-            apply_weapon_params(tmp_folder, PT, RAZB)
-            build_weapon_zip(tmp_folder, zip_path)
+            image_path = await kvadratik(hex_color)
             await y.delete()
-            await bot.send_document(
-                message.chat.id,
-                FSInputFile(zip_path),
-                caption=(
-                    f"🔫 <b>Weapon готов!</b>\n\n"
-                    f"📦 Патроны: <b>{PT}</b>\n"
-                    f"🎯 Разброс: <b>{RAZB}</b>\n"
-                    f"🗂 Пресет: {preset['name']}\n"
-                    f"📄 {preset['desc']}"
-                ),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await y.edit_text(f"❌ Ошибка: {e}")
-        finally:
-            shutil.rmtree(tmp_folder, ignore_errors=True)
-            if os.path.exists(zip_path):
-                os.remove(zip_path)
-    elif '/particle' in message.text and len(message.text.split()) >= 2:
-      try:
-          user = message.from_user.id
-          y = await message.answer("Обрабатываю...")
-          j = message.text.split()
-          if len(j) < 3:
-              await bot.send_message(user, "Неверный формат команды. Используйте: /particle <цвет> <размер>")
-              return
-          rgb = ImageColor.getrgb(j[1])
-          if len(j) < 2:
-              await bot.send_message(user,
-                                     "Неверный формат команды. Используйте: /particle <цвет> <размер> <время> <гравитация> <разброс>")
-              return
-          r, g, b = map(str, rgb)
-          q = "some_unique_q_value"
-          r_value = "some_unique_r_value"
-          work_dir = Path(f'work/work_BLOOD/{q}')
-          work_dir.mkdir(parents=True, exist_ok=True)
-          grn1_path = work_dir / f'{r_value}_particle.cfg'
-          with open('particleCH.cfg', 'r') as infile:
-              t = infile.read()
-          t = t.replace("r22", r) \
-              .replace("g22", g) \
-              .replace("b22", b)
-          if len(j) > 2:
-              raz = j[2]
-              time = j[3]
-              grav = j[4]
-              rzbros = j[5]
-              t = t.replace("Q11", raz) \
-                  .replace("U11", grav) \
-                  .replace("R11", rzbros) \
-                  .replace("T11", time)
-          with open(grn1_path, 'w') as outfile:
-              outfile.write(t)
-          await y.delete()
-          await t_client.send_file(user, grn1_path, caption='⚡️ Ваш particle.cfg готов!')
-      except (ValueError, IndexError) as e:
-          await bot.send_message(user, f"Ошибка при обработке параметров цвета или команды: {e}")
-      except Exception as e:
-          await bot.send_message(user, f"Произошла непредвиденная ошибка: {e}")
-      finally:
-          if 'work_dir' in locals() and work_dir.exists():
-              shutil.rmtree(work_dir)
-    elif '/btx' in message.text.split():
-        parts = message.text.strip().split()
-        block_arg   = parts[1].lower() if len(parts) > 1 else None
-        quality_arg = parts[2].lower() if len(parts) > 2 else None
+            await t_client.send_file(user_id, image_path, caption=f'🎨<b>Палитра цвета - {hex_color}</b>', parse_mode="HTML")
+            os.remove(image_path)
+        elif "/checkcolor" in message.text:
+            await message.answer("❔ Пример: /checkcolor #FF0000")
 
-        valid_blocks   = list(BTX_BLOCK_MAP.keys())
-        valid_quality  = list(BTX_QUALITY_MAP.keys())
+        elif '/wpr' in j:
+            try: preset_arg = j[1]
+            except: await message.answer("❔ Пример: /wpr 2"); return
+            if preset_arg not in PRESETS:
+                await message.answer("❔ Доступные пресеты: 1, 2, 3, 4"); return
+            weapon_user_settings[user_id] = preset_arg
+            preset = PRESETS[preset_arg]
+            await message.answer(f"✅ <b>Пресет weapon сохранён</b>\n🗂 {preset['name']}\n📄 {preset['desc']}\n\nОтправь <b>/weapon &lt;PT&gt; &lt;RAZB&gt;</b>", parse_mode="HTML")
 
-        errors = []
-        bw, bh  = BTX_DEFAULT_BLOCK
-        quality = BTX_DEFAULT_QUALITY
-        quality_name = "medium"
+        elif '/weapon' in j and len(j) >= 3:
+            try: PT = int(j[1]); RAZB = int(j[2])
+            except: await message.answer("❌ PT и RAZB должны быть числами.\nПример: /weapon 9 50"); return
+            preset_id = weapon_user_settings.get(user_id, "1")
+            preset = PRESETS[preset_id]
+            y = await message.answer("⏳ Обрабатываю...")
+            n = generate_random_string(8)
+            tmp_folder = f"work/work_weapon/{n}"
+            zip_path = f"work/work_weapon/{n}.zip"
+            try:
+                os.makedirs("work/work_weapon", exist_ok=True)
+                shutil.copytree(preset["folder"], tmp_folder)
+                apply_weapon_params(tmp_folder, PT, RAZB)
+                build_weapon_zip(tmp_folder, zip_path)
+                await y.delete()
+                await bot.send_document(message.chat.id, FSInputFile(zip_path),
+                    caption=(f"🔫 <b>Weapon готов!</b>\n\n📦 Патроны: <b>{PT}</b>\n🎯 Разброс: <b>{RAZB}</b>\n🗂 Пресет: {preset['name']}\n📄 {preset['desc']}"), parse_mode="HTML")
+            except Exception as e: await y.edit_text(f"❌ Ошибка: {e}")
+            finally:
+                shutil.rmtree(tmp_folder, ignore_errors=True)
+                if os.path.exists(zip_path): os.remove(zip_path)
 
-        if block_arg:
-            if block_arg in BTX_BLOCK_MAP:
-                bw, bh = BTX_BLOCK_MAP[block_arg]
+        elif '/particle' in message.text and len(j) >= 2:
+            try:
+                y = await message.answer("Обрабатываю...")
+                if len(j) < 3:
+                    await bot.send_message(user_id, "Неверный формат. Используйте: /particle <цвет> <размер>"); return
+                rgb = ImageColor.getrgb(j[1])
+                r_val, g_val, b_val = map(str, rgb)
+                q = generate_random_string(6)
+                work_dir_p = Path(f'work/work_BLOOD/{q}')
+                work_dir_p.mkdir(parents=True, exist_ok=True)
+                grn1_path = work_dir_p / f'{q}_particle.cfg'
+                with open('particleCH.cfg', 'r') as infile: t = infile.read()
+                t = t.replace("r22", r_val).replace("g22", g_val).replace("b22", b_val)
+                if len(j) > 2:
+                    t = t.replace("Q11", j[2]).replace("U11", j[4] if len(j) > 4 else "0").replace("R11", j[5] if len(j) > 5 else "0").replace("T11", j[3] if len(j) > 3 else "0")
+                with open(grn1_path, 'w') as outfile: outfile.write(t)
+                await y.delete()
+                await t_client.send_file(user_id, grn1_path, caption='⚡️ Ваш particle.cfg готов!')
+            except Exception as e: await bot.send_message(user_id, f"Ошибка: {e}")
+            finally:
+                if 'work_dir_p' in locals() and work_dir_p.exists(): shutil.rmtree(work_dir_p)
+
+        elif '/btx' in j:
+            parts = message.text.strip().split()
+            block_arg = parts[1].lower() if len(parts) > 1 else None
+            quality_arg = parts[2].lower() if len(parts) > 2 else None
+            errors = []
+            bw2, bh2 = BTX_DEFAULT_BLOCK
+            quality2 = BTX_DEFAULT_QUALITY
+            quality_name2 = "medium"
+            if block_arg:
+                if block_arg in BTX_BLOCK_MAP: bw2, bh2 = BTX_BLOCK_MAP[block_arg]
+                else: errors.append(f"❌ Неверный блок: <code>{block_arg}</code>. Доступные: {', '.join(BTX_BLOCK_MAP.keys())}")
+            if quality_arg:
+                if quality_arg in BTX_QUALITY_MAP: quality2 = BTX_QUALITY_MAP[quality_arg]; quality_name2 = quality_arg
+                else: errors.append(f"❌ Неверное качество: <code>{quality_arg}</code>. Доступные: {', '.join(BTX_QUALITY_MAP.keys())}")
+            if errors: await message.answer("\n".join(errors), parse_mode="HTML"); return
+            btx_user_settings[user_id] = {"block": (bw2, bh2), "quality": quality2, "quality_name": quality_name2}
+            await message.answer(f"✅ <b>Настройки BTX сохранены</b>\n🔷 Блок: <code>{bw2}x{bh2}</code>\n⚙️ Качество: <code>{quality_name2}</code>", parse_mode="HTML")
+
+        elif '/search' in j:
+            try: args = j[1]
+            except: await message.answer("❔ Пример: /search 11"); return
+            query = j[1].strip()
+            results = search_in_skins(query)
+            if results is None: await message.answer("Ошибка при чтении файла skins.txt")
+            elif not results: await message.answer(f"Нет информации о - {query}")
             else:
-                errors.append(f"❌ Неверный формат блока: <code>{block_arg}</code>\nДоступные: {', '.join(valid_blocks)}")
+                id_xyina, name_xyina = results[0]
+                attached_files = await filerpoisk(id_xyina, name_xyina, message)
+                response = []
+                if attached_files: response.extend(attached_files); response.append("")
+                response.append(f"ID - {id_xyina}"); response.append(f"NAME - {name_xyina}")
+                if not attached_files: await message.answer("\n".join(response))
 
-        if quality_arg:
-            if quality_arg in BTX_QUALITY_MAP:
-                quality      = BTX_QUALITY_MAP[quality_arg]
-                quality_name = quality_arg
-            else:
-                errors.append(f"❌ Неверное качество: <code>{quality_arg}</code>\nДоступные: {', '.join(valid_quality)}")
+        elif '/skin' in j:
+            try:
+                await t_client.send_file(user_id, f"skin/{j[1]}.dff", caption='⚡️<b>Держите скин!</b>', parse_mode="HTML", force_document=True)
+                await t_client.send_file(user_id, f"texture/texture_{j[1]}.zip", caption='⚡️<b>Держите текстуры!</b>', parse_mode="HTML", force_document=True)
+            except: await message.answer("Такого названия нет")
 
-        if errors:
-            await message.answer("\n".join(errors), parse_mode="HTML")
-            return
+        elif '/car' in j:
+            try: await t_client.send_file(user_id, f"car/{j[1]}.mod", caption='⚡️<b>Держите машину!</b>', parse_mode="HTML", force_document=True)
+            except: await message.answer("Такого названия нет")
 
-        btx_user_settings[message.from_user.id] = {
-            "block":        (bw, bh),
-            "quality":      quality,
-            "quality_name": quality_name,
-        }
-
-        await message.answer(
-            f"✅ <b>Настройки BTX сохранены</b>\n"
-            f"🔷 Блок: <code>{bw}x{bh}</code>\n"
-            f"⚙️ Качество: <code>{quality_name}</code>\n\n"
-            f"Теперь отправьте <b>.png / .jpg / .btx / .zip</b> — будут использованы эти настройки.",
-            parse_mode="HTML"
-        )
-
-    elif '/search' in message.text.split():
-        y = await message.answer("Обрабатываю...")
-        try:
-            args = j[1]
-        except:
-            await message.answer("❔ Пример использования: /skin <ID or NAME> \nПример использования: /skin 11")
-            return
-        query = j[1].strip()
-        results = search_in_skins(query)
-        if results is None:
-            await message.answer("Ошибка при чтении файла skins.txt")
-        elif not results:
-            await message.answer(f"Нет информации о - {query} ID/NAME")
-        else:
-            id_xyina, name_xyina = results[0]
-            attached_files = await filerpoisk(id_xyina, name_xyina, message)
-            response = []
-            if attached_files:
-                response.extend(attached_files)
-                response.append("")
-            response.append(f"ID - {id_xyina}")
-            response.append(f"NAME - {name_xyina}")
-
-            full_response = "\n".join(response)
-            if not attached_files:
-                await message.answer(full_response)
-    elif '/skin' in message.text.split():
-        try:
-            user_id = message.from_user.id
-            await t_client.send_file(user_id, f"skin/{message.text.split()[1]}.dff",
-                                     caption='⚡️<b>Держите cкин!</b>', parse_mode="HTML", force_document=True)
-            await t_client.send_file(user_id, f"texture/texture_{message.text.split()[1]}.zip",
-                                     caption='⚡️<b>Держите текстуры!</b>', parse_mode="HTML", force_document=True)
-        except:
-            await message.answer("Такого названия нет")
-    elif '/car' in message.text.split():
-        try:
-            user_id = message.from_user.id
-            await t_client.send_file(user_id, f"car/{message.text.split()[1]}.mod",
-                                     caption='⚡️<b>Держите машину!</b>', parse_mode="HTML", force_document=True)
-        except:
-            await message.answer("Такого названия нет")
-    elif "/merger" in message.text:
-        if len(message.text.split()) < 3:
-            await message.answer(
-                "Неверный формат команды. Используйте: /merger <что копировать> <название текстуры(без .btx)\nВарианты копирования - tree, logo, bild")
-            return
-        letters = string.ascii_lowercase
-        r = ''.join(random.choice(letters) for i in range(length))
-        y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
-        clas = j[1].lower()
-        name = j[2]
-        if clas == "tree":
-            suffix = Tree
-        elif clas == "logo":
-            suffix = FILE_SUFFIXES
-        elif clas == "bild":
-            suffix = bild
-        else:
-            await message.answer("Неизвестный класс\nВарианты копирования - tree, logo, bild")
-            return
-        data = {
-            name: suffix
-        }
-        with open(f'Merger_{r}.json', 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        user_id = message.from_user.id
-        await y.delete()
-        await t_client.send_file(user_id, f'Merger_{r}.json', caption=f'⚡<b>Ваш Merger.json </b>', parse_mode="HTML")
-        os.remove(f'Merger_{r}.json')
-    elif "/aitimecyc" in message.text:
-        if len(message.text.split()) < 2:
-            await message.answer(
-                "❔ Формат: /aitimecyc <описание>\n\nПример: /aitimecyc закат с алыми облаками и туманом\nИли: /aitimecyc ночь с синим небом\n\nБот сгенерирует timecyc.json и превью картинку неба.")
-            return
-        description = message.text.replace("/aitimecyc", "", 1).strip()
-        y = await message.answer("🤖 <b>Генерирую таймсус...</b>", parse_mode="HTML")
-        try:
-            loop = asyncio.get_running_loop()
-            ai_colors = await loop.run_in_executor(None, _sync_aitimecyc, description)
-            json_path = await asyncio.to_thread(generate_aitimecyc_json, ai_colors)
-            preview_path = await asyncio.to_thread(generate_sky_preview, ai_colors, description)
-            sky_top_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SkyTopRGB"])
-            sky_bot_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SkyBottomRGB"])
-            cloud_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["CloudRGB"])
-            sun_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SunCoreRGB"])
-            user_id = message.from_user.id
+        elif "/merger" in message.text:
+            if len(j) < 3:
+                await message.answer("Неверный формат. Используйте: /merger <что копировать> <название>\nВарианты: tree, logo, bild"); return
+            r2 = ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+            y = await message.answer("⏳<b>Обрабатываю...</b>", parse_mode="HTML")
+            clas = j[1].lower()
+            name = j[2]
+            if clas == "tree": suffix = Tree
+            elif clas == "logo": suffix = FILE_SUFFIXES
+            elif clas == "bild": suffix = bild
+            else: await message.answer("Неизвестный класс. Варианты: tree, logo, bild"); return
+            data = {name: suffix}
+            with open(f'Merger_{r2}.json', 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
             await y.delete()
-            await t_client.send_file(
-                user_id, preview_path,
-                caption=(
-                    f"🎨 <b>AI TimeCyc по описанию:</b>\n<i>{description}</i>\n\n"
-                    f"🌅 SkyTop: <code>{sky_top_hex}</code>\n"
-                    f"🌄 SkyBottom: <code>{sky_bot_hex}</code>\n"
-                    f"☁️ Cloud: <code>{cloud_hex}</code>\n"
-                    f"☀️ Sun: <code>{sun_hex}</code>"
-                ),
-                parse_mode="HTML", force_document=False
-            )
-            await t_client.send_file(
-                user_id, json_path,
-                caption='<b>⚡️ timecyc.json готов!</b>', parse_mode="HTML", force_document=True
-            )
-            os.remove(json_path)
-            os.remove(preview_path)
-        except Exception as e:
-            await message.answer(f"❌ Ошибка: {e}")
-    elif "/aicolor" in message.text:
-        if len(message.text.split()) < 2:
-            await message.answer(
-                "❔ Неверный формат данных. Используйте: /aicolor <description>\n\nПример использования: /aicolor свет от луны")
-            return
-        description = str(message.text)
-        description = description.replace("/aicolor ", "").strip()
-        hex_color = get_hex_from_description(description)
-        image_path = await kvadratik(hex_color)
-        user_id = message.from_user.id
-        await t_client.send_file(user_id, image_path, caption=f'🎨<b>Hex цвет - {hex_color} </b>', parse_mode="HTML")
-        os.remove(image_path)
-    elif "/randcolor" in message.text:
-        hex_color = random_color()
-        image_path = await kvadratik(hex_color)
-        user_id = message.from_user.id
-        await t_client.send_file(user_id, image_path, caption=f'🎨<b>Hex цвет - {hex_color} </b>', parse_mode="HTML")
-        os.remove(image_path)
-    elif "/help" in message.text:
-        await message.answer("""<b>Привет👋 Вот возможности бота:</b>
+            await t_client.send_file(user_id, f'Merger_{r2}.json', caption=f'⚡<b>Ваш Merger.json</b>', parse_mode="HTML")
+            os.remove(f'Merger_{r2}.json')
+
+        elif "/aitimecyc" in message.text:
+            if len(j) < 2:
+                await message.answer("❔ Формат: /aitimecyc <описание>\nПример: /aitimecyc закат с алыми облаками"); return
+            description = message.text.replace("/aitimecyc", "", 1).strip()
+            y = await message.answer("🤖 <b>Генерирую таймсус...</b>", parse_mode="HTML")
+            try:
+                loop = asyncio.get_running_loop()
+                ai_colors = await loop.run_in_executor(None, _sync_aitimecyc, description)
+                json_path = await asyncio.to_thread(generate_aitimecyc_json, ai_colors)
+                preview_path = await asyncio.to_thread(generate_sky_preview, ai_colors, description)
+                sky_top_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SkyTopRGB"])
+                sky_bot_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SkyBottomRGB"])
+                cloud_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["CloudRGB"])
+                sun_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SunCoreRGB"])
+                await y.delete()
+                await t_client.send_file(user_id, preview_path,
+                    caption=(f"🎨 <b>AI TimeCyc:</b>\n<i>{description}</i>\n\n"
+                             f"🌅 SkyTop: <code>{sky_top_hex}</code>\n🌄 SkyBottom: <code>{sky_bot_hex}</code>\n"
+                             f"☁️ Cloud: <code>{cloud_hex}</code>\n☀️ Sun: <code>{sun_hex}</code>"), parse_mode="HTML")
+                await t_client.send_file(user_id, json_path, caption='<b>⚡️ timecyc.json готов!</b>', parse_mode="HTML", force_document=True)
+                os.remove(json_path); os.remove(preview_path)
+            except Exception as e: await message.answer(f"❌ Ошибка: {e}")
+
+        elif "/aicolor" in message.text:
+            if len(j) < 2:
+                await message.answer("❔ Пример: /aicolor свет от луны"); return
+            description = message.text.replace("/aicolor ", "").strip()
+            hex_color = get_hex_from_description(description)
+            image_path = await kvadratik(hex_color)
+            await t_client.send_file(user_id, image_path, caption=f'🎨<b>Hex цвет - {hex_color}</b>', parse_mode="HTML")
+            os.remove(image_path)
+
+        elif "/randcolor" in message.text:
+            hex_color = random_color()
+            image_path = await kvadratik(hex_color)
+            await t_client.send_file(user_id, image_path, caption=f'🎨<b>Hex цвет - {hex_color}</b>', parse_mode="HTML")
+            os.remove(image_path)
+
+        elif "/help" in message.text:
+            await message.answer("""<b>Привет👋 Вот возможности бота:</b>
 
 <b>📌 Основные команды:</b>
 /start — начать работу с ботом
-/mysub — eпоказать информацию о подписке
-/edit - Запуск фотошопа
-/help - Помощь
+/mysub — информация о подписке
+/top — топ активных пользователей
+/edit — запуск фотошопа
+/help — помощь
 
 <b>🎨 Работа с цветом:</b>
-/color - Покраска Изображений
-/recolor - Перекраска цвета
-/checkcolor - Палитра цвета
-/aicolor - Цвет по описанию
-/randcolor - Случайный приятный цвет
-/overlay - Наложение изображения
-/filters - Фильтры и настройка изображения
-/hud1 - Перекраска белого hud
-/hud2 - Перекраска полупрозрачного hud
-/hud3 - Перекраска оригинального hud
-/hud4 - Перекраска нового hud
-/hp1 - Перекраска оригинального hud
-/hp2 - Перекраска белого hud
-/hud3 - Перекраска нового hud
-/blood - Перекраска кастом крови
-/tree - Перекраска оригинальной листвы
-/vctree - Перекраска листвы стиля GTA Vice City
-/kp1 - Перекраска белых с обводкой
-/kp2 - Перекраска кнопок с блуд раша
-/kp3 - Перекраска прозрачные черных кнопок
-/kp4 - Перекраска серых кнопок
-/kp5 - Перекраска gta5 кнопок
-/kp6 - Перекраска smart кнопок
-/kp7 - Перекраска vine кнопок
-/kp8 - Перекраска коричневых кнопок
-/kp9 - Перекраска оригинальных кнопок
-/carmenu - Перекраска меню в машине
-/speedometer - Перекраска спидометра машины
-/road - Перекраска дорог
-/casino - Перекраска Казино
-/pickup - Перекраска пикапов
+/color - покраска изображений
+/recolor - перекраска цвета
+/checkcolor - палитра цвета
+/aicolor - цвет по описанию
+/randcolor - случайный приятный цвет
+/overlay - наложение изображения
+/filters - фильтры
+/hud1-4 - перекраска hud
+/hp1-3 - перекраска элементов hud
+/blood - кровь | /tree - листва | /vctree - VC листва
+/kp1-9 - кнопки | /carmenu - меню машины
+/speedometer - спидометр | /road - дороги
+/casino - казино | /pickup - пикапы
 
 <b>📂 Создание файлов:</b>
-/weapon - Создание weapon.dat
-/timecyc - сгенерировать оптимизированный TimeCycle
-/colorcyc - сгенерировать ColorCycle
-/particle - создание кастом крови
-/genrl - создание кастом звуков бр
-/bpc - шифровка bpc
-/nri - сборки с neizzir на nonerai
-/merger - merger из файлов в zip
-/index - индексация zip → .tmb
-/aitimecyc - ИИ генерация TimeCycle по описанию
-
-<b>🧰 Копирование:</b>
-/logo - Копирование Логотипов
-/bild - Копирование Билбордов
-/tree - Копирование Листвы
-/merger - сгенерировать Merger
+/weapon - weapon.dat | /timecyc - TimeCycle
+/colorcyc - ColorCycle | /particle - кровь
+/genrl - звуки бр | /bpc - шифровка bpc
+/nri - сборки nonerai | /merger - Merger
+/index - индексация | /aitimecyc - AI TimeCycle
 
 <b>✂️ Нарезка:</b>
-/hudcut - Нарезка hud
-/map - Нарезка map
-/remap - Восстановить map
-/rehud - Восстановить hud
+/hudcut - нарезка hud | /map - нарезка map
+/remap - восстановить map | /rehud - восстановить hud
 
-<b>🌐 Дополнительно :</b>
-/ptk - пипетка изображения
-/aim - Конвертация Прицела
-/weather - Создание Погоды
-/compress - Сжатие веса
-/search - Получить название из ID и наоборот(cкин)
-/btx - настройка сжатия
-/wpr - настройка веапона
+<b>🌐 Дополнительно:</b>
+/ptk - пипетка | /aim - прицел
+/weather - погода | /compress - сжатие
+/search - поиск скина | /btx - настройка BTX | /wpr - веапон
 
 <b>📁 Автоматически:</b>
-<i><b>файл.btx/.png/.jpg/.zip</b></i> - обработка BTX,PNG,JPG
-<i><b>файл.txd</b></i> - расшифровка 
-TXD
-<i><b>файл.bpc</b></i> - расшифровка 
-bpc
-<i><b>файл.ifp </b></i>- расшифровка анимаций
-<i><b>файл.cls</b></i> - расшифровка коллизий
-<i><b>файл.mod</b></i> - расшифровка моделей
-<i><b>timecyc.dat</b></i>- конвертация Samp неба в Black Russia
-<i><b>timecyc.json</b></i> - узнать цвета из Timecyc""", parse_mode='HTML')
-    elif "/sub" in message.text and len(message.text.split()) >= 3:
-        sender_id = message.from_user.id
-        admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (sender_id,), fetchone=True)
-        if admin_status_row and admin_status_row[0] == 'True':
-            target_user_id = int(j[1])
-            target_user_row = execute_sql_query("SELECT username FROM users WHERE chat_id=?", (target_user_id,), fetchone=True)
-            if target_user_row:
-                target_username = target_user_row[0]
-                action = j[2]
-                if len(j) == 4 and action == 'True':
-                    expiry_date_str = j[3]
-                    try:
-                        datetime.datetime.strptime(expiry_date_str, "%d.%m.%Y")
-                        execute_sql_query("UPDATE users SET sub='True', time=? WHERE chat_id=?",
-                                          (expiry_date_str, target_user_id))
-                        await message.answer(
-                            f'Пользователю {target_username} успешно выдана подписка до {expiry_date_str}!')
-                    except ValueError:
-                        await message.answer("Неверный формат даты! Используйте %d.%m.%Y.")
-                elif action == 'False':
-                    execute_sql_query("UPDATE users SET sub='False', time=NULL WHERE chat_id=?", (target_user_id,))
-                    await message.answer(f"У пользователя {target_username} успешно забрана подписка!")
-                else:
-                    await message.answer("Неверный формат команды или статуса подписки ('True'/'False')!")
-            else:
-                await message.answer(f"Пользователь с ID {target_user_id} не найден в базе данных.")
-        else:
-            await message.answer("У вас нет прав администратора для выполнения этой команды.")
+<i>.btx/.png/.jpg/.zip</i> — обработка BTX/PNG/JPG
+<i>.txd</i> — расшифровка TXD
+<i>.bpc</i> — расшифровка bpc
+<i>.ifp</i> — расшифровка анимаций
+<i>.cls</i> — расшифровка коллизий
+<i>.mod</i> — расшифровка моделей
+<i>timecyc.dat</i> — конвертация в Black Russia
+<i>timecyc.json</i> — цвета из Timecyc""", parse_mode='HTML')
 
-    elif "/kotek" in message.text:
-        await update(message.chat.id, message.from_user.username)
-        sender_id = message.from_user.id
-        admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (sender_id,), fetchone=True)
-        if admin_status_row and admin_status_row[0] == 'True':
-            all_users = execute_sql_query("SELECT chat_id FROM users", fetchall=True)
-            message_to_send = message.text.replace("/rass", "").strip()
-            if message_to_send:
-                for user_row in all_users:
-                    user_id = user_row[0]
-                    try:
-                        await bot.send_message(user_id, message_to_send)
-                        await asyncio.sleep(0.1)
-                    except Exception as e:
-                        print(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
-                await message.answer(f"Рассылка завершена для всех пользователей.")
-            else:
-                await message.answer("Введите текст рассылки после команды /rass.")
-        else:
-            await message.answer("У вас нет прав администратора для выполнения этой команды.")
-    elif "/send" in message.text:
-        sender_id = message.from_user.id
-        target_id_str = j[1]
-        admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (sender_id,), fetchone=True)
-        if admin_status_row and admin_status_row[0] == 'True':
-            try:
-                target_id = int(target_id_str)
-                text_to_send = message.text.replace("/send", "").replace(target_id_str, "").strip()
-                if text_to_send:
-                    await bot.send_message(target_id, text_to_send)
-                    await message.answer(f"Сообщение успешно отправлено пользователю {target_id}.")
-                else:
-                    await message.answer("Введите текст сообщения после ID получателя.")
-            except ValueError:
-                await message.answer("Неверный формат ID получателя.")
-            except Exception as e:
-                await message.answer(f"Ошибка при отправке сообщения: {e}")
-        else:
-            await message.answer("У вас нет прав администратора для выполнения этой команды.")
+        elif "/sub" in message.text and len(j) >= 3:
+            admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
+            if admin_status_row and admin_status_row[0] == 'True':
+                target_user_id = int(j[1])
+                target_user_row = execute_sql_query("SELECT username FROM users WHERE chat_id=?", (target_user_id,), fetchone=True)
+                if target_user_row:
+                    target_username = target_user_row[0]
+                    action = j[2]
+                    if len(j) == 4 and action == 'True':
+                        expiry_date_str = j[3]
+                        try:
+                            datetime.datetime.strptime(expiry_date_str, "%d.%m.%Y")
+                            execute_sql_query("UPDATE users SET sub='True', time=? WHERE chat_id=?", (expiry_date_str, target_user_id))
+                            await message.answer(f'Пользователю {target_username} выдана подписка до {expiry_date_str}!')
+                        except ValueError: await message.answer("Неверный формат даты! Используйте %d.%m.%Y.")
+                    elif action == 'False':
+                        execute_sql_query("UPDATE users SET sub='False', time=NULL WHERE chat_id=?", (target_user_id,))
+                        await message.answer(f"У пользователя {target_username} забрана подписка!")
+                    else: await message.answer("Неверный формат команды!")
+                else: await message.answer(f"Пользователь с ID {target_user_id} не найден.")
+            else: await message.answer("У вас нет прав администратора.")
+
+        elif "/kotek" in message.text:
+            admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
+            if admin_status_row and admin_status_row[0] == 'True':
+                all_users = execute_sql_query("SELECT chat_id FROM users", fetchall=True)
+                message_to_send2 = message.text.replace("/kotek", "").strip()
+                if message_to_send2:
+                    for user_row in all_users:
+                        uid2 = user_row[0]
+                        try: await bot.send_message(uid2, message_to_send2); await asyncio.sleep(0.1)
+                        except Exception as e: print(f"Не удалось отправить {uid2}: {e}")
+                    await message.answer("Рассылка завершена.")
+                else: await message.answer("Введите текст рассылки после команды.")
+            else: await message.answer("У вас нет прав администратора.")
+
+        elif "/send" in message.text:
+            admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
+            if admin_status_row and admin_status_row[0] == 'True':
+                try:
+                    target_id_str = j[1]
+                    target_id = int(target_id_str)
+                    text_to_send = message.text.replace("/send", "").replace(target_id_str, "").strip()
+                    if text_to_send:
+                        await bot.send_message(target_id, text_to_send)
+                        await message.answer(f"Сообщение отправлено пользователю {target_id}.")
+                    else: await message.answer("Введите текст сообщения после ID получателя.")
+                except ValueError: await message.answer("Неверный формат ID.")
+                except Exception as e: await message.answer(f"Ошибка: {e}")
+            else: await message.answer("У вас нет прав администратора.")
+
+    finally:
+        if is_processing_cmd:
+            await queue_release(is_subscribed)
+
 async def main():
     await setup_work_dirs()
+    init_semaphores()
     await p_app.start()
     await t_client.start(bot_token=BOT_TOKEN)
     try:
@@ -3671,5 +3217,6 @@ async def main():
     finally:
         await p_app.stop()
         await t_client.disconnect()
+
 if __name__ == "__main__":
     asyncio.run(main())
