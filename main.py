@@ -237,7 +237,7 @@ async def run_with_timeout(coro, timeout_sec: float, user_id: int,
 def check_antispam(user_id: int, is_paid: bool = False):
     if is_paid:
         return True, 0.0
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     now = time.time()
     c.execute("SELECT window_start, msg_count, blocked_until FROM antispam WHERE user_id=?", (user_id,))
@@ -265,7 +265,7 @@ def check_antispam(user_id: int, is_paid: bool = False):
 def check_file_antispam(user_id: int, is_paid: bool = False):
     if is_paid:
         return True, 0.0
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     now = time.time()
     c.execute("SELECT file_window_start, file_count, file_blocked_until FROM antispam WHERE user_id=?", (user_id,))
@@ -292,7 +292,7 @@ def check_file_antispam(user_id: int, is_paid: bool = False):
     return True, 0.0
 
 def get_required_channels():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT channel_username FROM required_channels")
     rows = c.fetchall()
@@ -300,13 +300,13 @@ def get_required_channels():
     return [r[0] for r in rows]
 
 def add_channel(username: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO required_channels (channel_username, channel_name) VALUES (?,?)", (username, username))
     conn.commit(); conn.close()
 
 def remove_channel(username: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("DELETE FROM required_channels WHERE channel_username=?", (username,))
     ok = c.rowcount > 0
@@ -325,7 +325,7 @@ async def check_required_subs(user_id: int):
     return not_sub
 
 def is_banned(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT banned, ban_reason FROM users WHERE chat_id=?", (user_id,))
     row = c.fetchone()
@@ -335,26 +335,26 @@ def is_banned(user_id: int):
     return False, None
 
 def ban_user(user_id: int, reason: str = "Нарушение правил"):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("UPDATE users SET banned='True', ban_reason=? WHERE chat_id=?", (reason, user_id))
     conn.commit(); conn.close()
 
 def unban_user(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("UPDATE users SET banned='False', ban_reason=NULL WHERE chat_id=?", (user_id,))
     conn.commit(); conn.close()
 
 def inc_msg_count(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
     c.execute("UPDATE users SET msg_count=COALESCE(CAST(msg_count AS INTEGER),0)+1, last_active=? WHERE chat_id=?", (now, user_id))
     conn.commit(); conn.close()
 
 def get_top_users(limit=10):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT chat_id, username, COALESCE(CAST(msg_count AS INTEGER),0) FROM users WHERE banned!='True' ORDER BY CAST(msg_count AS INTEGER) DESC LIMIT ?", (limit,))
     rows = c.fetchall()
@@ -362,7 +362,7 @@ def get_top_users(limit=10):
     return rows
 
 def get_bot_stats():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users"); total = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM users WHERE sub='True'"); paid = c.fetchone()[0]
@@ -399,14 +399,14 @@ async def auto_cleanup():
         shutil.rmtree(d, ignore_errors=True)
 
 def save_invoice(payload: str, user_id: int, stars: int, days: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO pending_invoices (payload,user_id,stars,days,created_at) VALUES (?,?,?,?,?)",
               (payload, user_id, stars, days, datetime.datetime.now().isoformat()))
     conn.commit(); conn.close()
 
 def pop_invoice(payload: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT user_id, stars, days FROM pending_invoices WHERE payload=?", (payload,))
     row = c.fetchone()
@@ -416,7 +416,7 @@ def pop_invoice(payload: str):
     return row
 
 def grant_subscription(user_id: int, days: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     if days == -1:
         expiry = "31.12.2099"
@@ -428,7 +428,7 @@ def grant_subscription(user_id: int, days: int):
 
 def create_promo(code, name, comment, link, discount_pct, custom_stars,
                  custom_days, max_uses, expires_at, created_by):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     now = datetime.datetime.now().isoformat()
     try:
@@ -445,7 +445,7 @@ def create_promo(code, name, comment, link, discount_pct, custom_stars,
         return False, "Промокод уже существует"
 
 def get_promo(code):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT * FROM promo_codes WHERE code=? AND is_active=1", (code.upper(),))
     row = c.fetchone()
@@ -457,7 +457,7 @@ def get_promo(code):
     return dict(zip(keys, row))
 
 def list_promos():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT code,name,discount_pct,custom_stars,custom_days,uses,"
               "max_uses,expires_at,is_active FROM promo_codes ORDER BY id DESC")
@@ -465,7 +465,7 @@ def list_promos():
     return rows
 
 def deactivate_promo(code):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("UPDATE promo_codes SET is_active=0 WHERE code=?", (code.upper(),))
     ok = c.rowcount > 0; conn.commit(); conn.close()
@@ -483,7 +483,7 @@ def use_promo(code, user_id):
             pass
     if p["max_uses"] > 0 and p["uses"] >= p["max_uses"]:
         return False, None, "❌ Лимит использований исчерпан"
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT active_promo FROM users WHERE chat_id=?", (user_id,))
     existing = c.fetchone()
@@ -532,17 +532,17 @@ ROLES = {
 }
 
 def get_role(user_id: int) -> str:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
-    c.execute("SELECT role FROM users WHERE chat_id=?", (user_id,))
-    row = c.fetchone(); conn.close()
-    if row and row[0] in ROLES:
-        return row[0]
-    c2 = sqlite3.connect(DB_PATH)
-    cur = c2.cursor()
-    cur.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
-    r2 = cur.fetchone(); c2.close()
-    if r2 and r2[0] == "True":
+    c.execute("SELECT role, admin FROM users WHERE chat_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    role, admin = row
+    if role in ROLES:
+        return role
+    if admin == "True":
         return "admin"
     return None
 
@@ -556,7 +556,7 @@ def has_perm(user_id: int, min_role: str) -> bool:
 def set_role(user_id: int, role: str, by_id: int):
     if role not in ROLES and role != "none":
         return False
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     new_role = role if role != "none" else None
     new_admin = "True" if role in ("admin", "developer") else "False"
@@ -571,7 +571,7 @@ def set_role(user_id: int, role: str, by_id: int):
     return ok
 
 def get_all_staff():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT chat_id, username, role FROM users WHERE role IS NOT NULL ORDER BY role")
     rows = c.fetchall(); conn.close()
@@ -582,7 +582,7 @@ def get_all_staff():
 def create_prank_poll(question: str, real_opts: list, mapped_opts: list,
                       mode: str, created_by: int) -> int:
     import json as _j
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("""INSERT INTO prank_polls
         (question, real_options, mapped_options, mode, created_by, created_at, votes_json)
@@ -596,7 +596,7 @@ def create_prank_poll(question: str, real_opts: list, mapped_opts: list,
 
 def get_prank_poll(poll_id: int):
     import json as _j
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT * FROM prank_polls WHERE id=?", (poll_id,))
     row = c.fetchone(); conn.close()
@@ -615,7 +615,7 @@ def get_prank_poll(poll_id: int):
 
 def record_prank_vote(poll_id: int, user_id: int, chosen_idx: int):
     import json as _j
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT votes_json, mapped_options FROM prank_polls WHERE id=?", (poll_id,))
     row = c.fetchone()
@@ -634,7 +634,7 @@ def record_prank_vote(poll_id: int, user_id: int, chosen_idx: int):
 
 def get_prank_poll_stats(poll_id: int):
     import json as _j
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT votes_json, real_options FROM prank_polls WHERE id=?", (poll_id,))
     row = c.fetchone(); conn.close()
@@ -649,7 +649,7 @@ def get_prank_poll_stats(poll_id: int):
     return {opts[i]: counts.get(i, 0) for i in range(len(opts))}
 
 def get_review_stats():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT COUNT(*), AVG(rating) FROM reviews")
     row = c.fetchone()
@@ -659,14 +659,14 @@ def get_review_stats():
     return total, avg
 
 def add_review(user_id: int, rating: int, text: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO reviews (user_id, rating, text, created_at) VALUES (?,?,?,?)",
               (user_id, rating, text, datetime.datetime.now().isoformat()))
     conn.commit(); conn.close()
 
 def get_reviews(limit: int = 20):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT r.user_id, u.username, r.rating, r.text, r.created_at FROM reviews r LEFT JOIN users u ON r.user_id=u.chat_id ORDER BY r.created_at DESC LIMIT ?", (limit,))
     rows = c.fetchall(); conn.close()
@@ -692,7 +692,7 @@ def register_referral(referrer_id, referred_id):
     suspicious, reason = is_referral_suspicious(referrer_id, referred_id)
     if suspicious:
         return
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     try:
         c.execute("INSERT OR IGNORE INTO referrals (referrer_id,referred_id,created_at) VALUES (?,?,?)",
@@ -705,14 +705,14 @@ def register_referral(referrer_id, referred_id):
     conn.close()
 
 def count_paid_referrals(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND paid=1", (user_id,))
     n = c.fetchone()[0]; conn.close()
     return n
 
 def get_buyer_discount(referred_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT referred_by FROM users WHERE chat_id=?", (referred_id,))
     row = c.fetchone(); conn.close()
@@ -736,7 +736,7 @@ def get_l2_reward_pct(referrer_id):
     return 1
 
 def mark_referral_paid(referred_id, stars_paid):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT referrer_id FROM referrals WHERE referred_id=? AND paid=0", (referred_id,))
     row = c.fetchone()
@@ -770,7 +770,7 @@ def mark_referral_paid(referred_id, stars_paid):
     return referrer_id, reward, l2_referrer, l2_reward
 
 def get_ref_stats(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user_id,))
     total = c.fetchone()[0]
@@ -786,7 +786,7 @@ def get_ref_stats(user_id):
 
 # ── Groq rate limit ────────────────────────────────────────────────────
 def check_groq_rate(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     now = __import__('time').time()
     c.execute("SELECT window_start, count FROM groq_rate WHERE user_id=?", (user_id,))
@@ -807,14 +807,14 @@ def check_groq_rate(user_id: int) -> bool:
 
 # ── Command stats ──────────────────────────────────────────────────────
 def log_command(user_id: int, command: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT INTO command_stats (user_id, command, used_at) VALUES (?,?,?)",
               (user_id, command, datetime.datetime.now().isoformat()))
     conn.commit(); conn.close()
 
 def get_command_stats(limit=15):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT command, COUNT(*) as cnt FROM command_stats GROUP BY command ORDER BY cnt DESC LIMIT ?", (limit,))
     rows = c.fetchall(); conn.close()
@@ -822,14 +822,14 @@ def get_command_stats(limit=15):
 
 # ── Registration tracking ──────────────────────────────────────────────
 def register_user_date(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO registrations (user_id, registered_at) VALUES (?,?)",
               (user_id, datetime.datetime.now().isoformat()))
     conn.commit(); conn.close()
 
 def get_reg_stats(period_hours: int = 24):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     since = (datetime.datetime.now() - datetime.timedelta(hours=period_hours)).isoformat()
     c.execute("SELECT COUNT(*) FROM registrations WHERE registered_at >= ?", (since,))
@@ -841,7 +841,7 @@ def get_reg_chart(period: str = "week"):
     periods = {"hour": (1, "%H:%M", 1), "day": (24, "%H:00", 1),
                "week": (168, "%d.%m", 24), "month": (720, "%d.%m", 24*7), "year": (8760, "%m.%Y", 24*30)}
     hours, fmt, bucket_h = periods.get(period, periods["week"])
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     since = (datetime.datetime.now() - datetime.timedelta(hours=hours)).isoformat()
     c.execute("SELECT registered_at FROM registrations WHERE registered_at >= ? ORDER BY registered_at", (since,))
@@ -858,14 +858,14 @@ def get_reg_chart(period: str = "week"):
 # ── Purchase history ───────────────────────────────────────────────────
 def log_purchase(user_id: int, stars: int, days: int, plan_label: str,
                  promo_code: str = None, discount_pct: int = 0):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT INTO purchases (user_id,stars,days,plan_label,promo_code,discount_pct,created_at) VALUES (?,?,?,?,?,?,?)",
               (user_id, stars, days, plan_label, promo_code, discount_pct, datetime.datetime.now().isoformat()))
     conn.commit(); conn.close()
 
 def get_purchase_history(user_id: int = None, limit: int = 20):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     if user_id:
         c.execute("SELECT p.*, u.username FROM purchases p LEFT JOIN users u ON p.user_id=u.chat_id WHERE p.user_id=? ORDER BY p.created_at DESC LIMIT ?", (user_id, limit))
@@ -875,7 +875,7 @@ def get_purchase_history(user_id: int = None, limit: int = 20):
     return rows
 
 def get_purchase_stats(period_hours: int = 24):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     since = (datetime.datetime.now() - datetime.timedelta(hours=period_hours)).isoformat()
     c.execute("SELECT COUNT(*), COALESCE(SUM(stars),0) FROM purchases WHERE created_at >= ?", (since,))
@@ -885,7 +885,7 @@ def get_purchase_stats(period_hours: int = 24):
 
 # ── Support tickets ────────────────────────────────────────────────────
 def create_ticket(user_id: int, username: str, is_premium: bool, subject: str, message: str) -> int:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT INTO support_tickets (user_id,username,is_premium,subject,message,created_at) VALUES (?,?,?,?,?,?)",
               (user_id, username, 1 if is_premium else 0, subject, message, datetime.datetime.now().isoformat()))
@@ -894,7 +894,7 @@ def create_ticket(user_id: int, username: str, is_premium: bool, subject: str, m
     return ticket_id
 
 def get_open_tickets(premium_first: bool = True):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     order = "is_premium DESC, created_at ASC" if premium_first else "created_at ASC"
     c.execute(f"SELECT id,user_id,username,is_premium,subject,status,created_at FROM support_tickets WHERE status='open' ORDER BY {order}")
@@ -902,21 +902,21 @@ def get_open_tickets(premium_first: bool = True):
     return rows
 
 def get_ticket(ticket_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT * FROM support_tickets WHERE id=?", (ticket_id,))
     row = c.fetchone(); conn.close()
     return row
 
 def close_ticket(ticket_id: int, admin_id: int, reply: str = None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("UPDATE support_tickets SET status='closed',closed_at=?,closed_by=?,reply=? WHERE id=?",
               (datetime.datetime.now().isoformat(), admin_id, reply, ticket_id))
     conn.commit(); conn.close()
 
 def get_ticket_stats():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM support_tickets"); total = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM support_tickets WHERE status='open'"); open_t = c.fetchone()[0]
@@ -926,48 +926,49 @@ def get_ticket_stats():
 
 # ── Promo: single active per user, auto-expire check ──────────────────
 def set_user_active_promo(user_id: int, code: str, expires_at: str = None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("UPDATE users SET active_promo=?, promo_expires=? WHERE chat_id=?",
               (code.upper() if code else None, expires_at, user_id))
     conn.commit(); conn.close()
 
 def get_user_active_promo(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT active_promo, promo_expires FROM users WHERE chat_id=?", (user_id,))
-    row = c.fetchone(); conn.close()
+    row = c.fetchone()
     if not row or not row[0]:
+        conn.close()
         return None
     code, exp = row
     if exp:
         try:
             if datetime.datetime.now() > datetime.datetime.fromisoformat(exp):
-                conn2 = sqlite3.connect(DB_PATH)
-                c2 = conn2.cursor()
-                c2.execute("UPDATE users SET active_promo=NULL, promo_expires=NULL WHERE chat_id=?", (user_id,))
-                conn2.commit(); conn2.close()
+                c.execute("UPDATE users SET active_promo=NULL, promo_expires=NULL WHERE chat_id=?", (user_id,))
+                conn.commit()
+                conn.close()
                 return None
         except: pass
+    conn.close()
     p = get_promo(code)
     if not p:
-        conn3 = sqlite3.connect(DB_PATH)
-        c3 = conn3.cursor()
-        c3.execute("UPDATE users SET active_promo=NULL, promo_expires=NULL WHERE chat_id=?", (user_id,))
-        conn3.commit(); conn3.close()
+        conn2 = sqlite3.connect(DB_PATH, timeout=10)
+        c2 = conn2.cursor()
+        c2.execute("UPDATE users SET active_promo=NULL, promo_expires=NULL WHERE chat_id=?", (user_id,))
+        conn2.commit(); conn2.close()
         return None
     return p
 
 # ── Trial subscription ─────────────────────────────────────────────────
 def can_use_trial(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT trial_used FROM users WHERE chat_id=?", (user_id,))
     row = c.fetchone(); conn.close()
     return row and row[0] != 'True'
 
 def mark_trial_used(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("UPDATE users SET trial_used='True' WHERE chat_id=?", (user_id,))
     conn.commit(); conn.close()
@@ -975,7 +976,7 @@ def mark_trial_used(user_id: int):
 # ── Free ref milestone ─────────────────────────────────────────────────
 def check_free_ref_milestone(referrer_id: int):
     """Award 1 month Pro for 25 total referrals; fires exactly once."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (referrer_id,))
     total_count = c.fetchone()[0]
@@ -992,7 +993,7 @@ def check_free_ref_milestone(referrer_id: int):
 
 # ── Anti-cheat referral ────────────────────────────────────────────────
 def is_referral_suspicious(referrer_id: int, referred_id: int) -> tuple:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT registered_at FROM registrations WHERE user_id=?", (referred_id,))
     row = c.fetchone()
@@ -1013,7 +1014,7 @@ def is_referral_suspicious(referrer_id: int, referred_id: int) -> tuple:
 
 # ── Batch session ──────────────────────────────────────────────────────
 def start_batch(user_id: int, command: str, caption: str = ""):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO batch_sessions (user_id,command,caption,files,started_at) VALUES (?,?,?,'[]',?)",
               (user_id, command, caption, datetime.datetime.now().isoformat()))
@@ -1021,7 +1022,7 @@ def start_batch(user_id: int, command: str, caption: str = ""):
 
 def add_batch_file(user_id: int, file_id: str, file_name: str):
     import json as _json
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT files FROM batch_sessions WHERE user_id=?", (user_id,))
     row = c.fetchone()
@@ -1036,7 +1037,7 @@ def add_batch_file(user_id: int, file_id: str, file_name: str):
 
 def get_batch(user_id: int):
     import json as _json
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT command, caption, files FROM batch_sessions WHERE user_id=?", (user_id,))
     row = c.fetchone(); conn.close()
@@ -1045,7 +1046,7 @@ def get_batch(user_id: int):
     return {"command": row[0], "caption": row[1], "files": _json.loads(row[2])}
 
 def clear_batch(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("DELETE FROM batch_sessions WHERE user_id=?", (user_id,))
     conn.commit(); conn.close()
@@ -1147,7 +1148,7 @@ def start_paid_text(expiry: str):
     )
 
 def initialize_database():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         chat_id INTEGER PRIMARY KEY,
@@ -1331,8 +1332,8 @@ initialize_database()
 async def save_workbook_to_disk():
     pass
 
-async def update(chat_id, username):
-    conn = sqlite3.connect(DB_PATH)
+def update(chat_id, username):
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     cursor = conn.cursor()
     current_date = datetime.datetime.now().date()
     message_to_send = None
@@ -1352,17 +1353,15 @@ async def update(chat_id, username):
     else:
         cursor.execute("INSERT INTO users (chat_id, username, sub, admin, time) VALUES (?, ?, 'False', 'False', NULL)",
                        (chat_id, username))
-        conn2_reg = sqlite3.connect(DB_PATH)
-        c2_reg = conn2_reg.cursor()
-        c2_reg.execute("INSERT OR IGNORE INTO registrations (user_id, registered_at) VALUES (?,?)",
+        # Reuse the same connection — opening a second one while the first holds a write lock causes "database is locked"
+        cursor.execute("INSERT OR IGNORE INTO registrations (user_id, registered_at) VALUES (?,?)",
                        (chat_id, datetime.datetime.now().isoformat()))
-        conn2_reg.commit(); conn2_reg.close()
     conn.commit()
     conn.close()
     return sub, message_to_send
 
 def find_user_data_in_sql(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     cursor = conn.cursor()
     cursor.execute("SELECT sub, time FROM users WHERE chat_id=?", (user_id,))
     result = cursor.fetchone()
@@ -1375,7 +1374,7 @@ async def get_user_status_async(user_id):
     return await asyncio.to_thread(find_user_data_in_sql, user_id)
 
 def execute_sql_query(query, params=(), fetchone=False, fetchall=False):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     cursor = conn.cursor()
     cursor.execute(query, params)
     if fetchone:
@@ -2487,7 +2486,7 @@ async def on_payment(message: types.Message):
                         parse_mode="HTML")
                 except Exception: pass
         # Free milestone check
-        conn_m = sqlite3.connect(DB_PATH)
+        conn_m = sqlite3.connect(DB_PATH, timeout=10)
         cm = conn_m.cursor()
         cm.execute("SELECT referrer_id FROM referrals WHERE referred_id=?", (user_id,))
         rrow = cm.fetchone(); conn_m.close()
@@ -2509,7 +2508,7 @@ async def on_payment(message: types.Message):
         "Все ограничения сняты. Приятного использования!", parse_mode="HTML")
     # Notify admins
     try:
-        conn_adm = sqlite3.connect(DB_PATH)
+        conn_adm = sqlite3.connect(DB_PATH, timeout=10)
         cadm = conn_adm.cursor()
         cadm.execute("SELECT chat_id FROM users WHERE admin='True'")
         adm_ids = [r[0] for r in cadm.fetchall()]; conn_adm.close()
@@ -2647,7 +2646,7 @@ async def cb_adm_commands_list(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "adm_main")
 async def cb_adm_main(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
@@ -2672,17 +2671,17 @@ async def cb_adm_stats(callback: types.CallbackQuery):
     reg24 = get_reg_stats(24)
     reg7d = get_reg_stats(24*7)
     t_total, t_open, t_prem_open = get_ticket_stats()
-    conn_r = sqlite3.connect(DB_PATH); cr = conn_r.cursor()
+    conn_r = sqlite3.connect(DB_PATH, timeout=10); cr = conn_r.cursor()
     cr.execute("SELECT COUNT(*) FROM referrals"); tot_refs = cr.fetchone()[0]
     cr.execute("SELECT COUNT(*) FROM referrals WHERE paid=1"); paid_refs = cr.fetchone()[0]
     cr.execute("SELECT COALESCE(SUM(CAST(ref_balance AS INTEGER)),0) FROM users"); total_bal = cr.fetchone()[0]
     conn_r.close()
-    conn_p = sqlite3.connect(DB_PATH); cp_c = conn_p.cursor()
+    conn_p = sqlite3.connect(DB_PATH, timeout=10); cp_c = conn_p.cursor()
     cp_c.execute("SELECT COUNT(*) FROM promo_codes WHERE is_active=1"); active_promos = cp_c.fetchone()[0]
     cp_c.execute("SELECT COALESCE(SUM(uses),0) FROM promo_codes"); promo_uses = cp_c.fetchone()[0]
     conn_p.close()
     rev_total, rev_avg = get_review_stats()
-    conn_cmd = sqlite3.connect(DB_PATH); cc = conn_cmd.cursor()
+    conn_cmd = sqlite3.connect(DB_PATH, timeout=10); cc = conn_cmd.cursor()
     today_iso = datetime.datetime.now().strftime("%Y-%m-%d")
     cc.execute("SELECT COUNT(*) FROM command_stats WHERE used_at LIKE ?", (f"{today_iso}%",)); cmds_today = cc.fetchone()[0]
     cc.execute("SELECT COUNT(*) FROM command_stats"); cmds_total = cc.fetchone()[0]
@@ -2732,7 +2731,7 @@ async def cb_adm_top(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "adm_cleanup")
 async def cb_adm_cleanup(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
@@ -2745,7 +2744,7 @@ async def cb_adm_cleanup(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "adm_bans_list")
 async def cb_adm_bans(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     adm = c.fetchone()
@@ -2790,7 +2789,7 @@ async def cb_adm_channels(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def cb_adm_broadcast(callback: types.CallbackQuery, state: FSMContext):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
@@ -2806,7 +2805,7 @@ async def cb_adm_broadcast(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(AdminFSM.broadcast_text)
 async def fsm_broadcast(message: types.Message, state: FSMContext):
     await state.clear()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT chat_id FROM users WHERE banned!='True'")
     users = [r[0] for r in c.fetchall()]; conn.close()
@@ -2827,7 +2826,7 @@ async def fsm_broadcast(message: types.Message, state: FSMContext):
             try: await progress.edit_text(f"📤 Отправлено: {sent} | Ошибок: {failed}")
             except: pass
         await asyncio.sleep(0.05)
-    conn2 = sqlite3.connect(DB_PATH)
+    conn2 = sqlite3.connect(DB_PATH, timeout=10)
     c2 = conn2.cursor()
     c2.execute("INSERT INTO broadcasts (text, sent_at, sent_by, total_sent) VALUES (?,?,?,?)",
                (message.text or message.caption or "[медиа]", datetime.datetime.now().isoformat(), message.from_user.id, sent))
@@ -2836,7 +2835,7 @@ async def fsm_broadcast(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "adm_poll_create")
 async def cb_adm_poll(callback: types.CallbackQuery, state: FSMContext):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
@@ -2860,12 +2859,12 @@ async def fsm_poll_opts(message: types.Message, state: FSMContext):
         await message.answer("❌ Нужно от 2 до 10 вариантов. Попробуйте ещё раз:"); return
     await state.clear()
     question = data['question']
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("INSERT INTO polls (question, options, created_at, created_by) VALUES (?,?,?,?)",
               (question, ",".join(opts), datetime.datetime.now().isoformat(), message.from_user.id))
     conn.commit(); conn.close()
-    conn2 = sqlite3.connect(DB_PATH)
+    conn2 = sqlite3.connect(DB_PATH, timeout=10)
     c2 = conn2.cursor()
     c2.execute("SELECT chat_id FROM users WHERE banned!='True'")
     users = [r[0] for r in c2.fetchall()]; conn2.close()
@@ -2935,7 +2934,7 @@ async def cb_adm_role_remove(callback: types.CallbackQuery, state: FSMContext):
 async def cb_adm_role_log(callback: types.CallbackQuery):
     if not has_perm(callback.from_user.id, "developer"):
         await callback.answer("❌", show_alert=True); return
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("""SELECT rl.user_id, u1.username, rl.role, u2.username, rl.assigned_at
                  FROM role_log rl
@@ -2957,7 +2956,7 @@ async def cb_adm_staff_stats(callback: types.CallbackQuery):
     if not has_perm(callback.from_user.id, "developer"):
         await callback.answer("❌", show_alert=True); return
     staff = get_all_staff()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     lines = ["👮 <b>Активность стаффа</b>\n"]
     for uid, uname, role in staff:
@@ -2978,7 +2977,7 @@ async def cb_adm_staff_stats(callback: types.CallbackQuery):
 async def cb_adm_polls_menu(callback: types.CallbackQuery):
     if not has_perm(callback.from_user.id, "admin"):
         await callback.answer("❌ Нет прав", show_alert=True); return
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM polls"); total = c.fetchone()[0]
     conn.close()
@@ -2995,7 +2994,7 @@ async def cb_adm_polls_menu(callback: types.CallbackQuery):
 async def cb_adm_poll_stats(callback: types.CallbackQuery):
     if not has_perm(callback.from_user.id, "admin"):
         await callback.answer("❌", show_alert=True); return
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT id, question, created_at FROM polls ORDER BY created_at DESC LIMIT 10")
     rows = c.fetchall(); conn.close()
@@ -3010,7 +3009,7 @@ async def cb_adm_poll_stats(callback: types.CallbackQuery):
 async def cb_adm_prank_menu(callback: types.CallbackQuery):
     if not has_perm(callback.from_user.id, "admin"):
         await callback.answer("❌ Нет прав", show_alert=True); return
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM prank_polls"); total = c.fetchone()[0]
     conn.close()
@@ -3049,7 +3048,7 @@ async def cb_adm_prank_create(callback: types.CallbackQuery, state: FSMContext):
 async def cb_adm_prank_stats(callback: types.CallbackQuery):
     if not has_perm(callback.from_user.id, "admin"):
         await callback.answer("❌", show_alert=True); return
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT id, question, mode, votes_json, is_active FROM prank_polls ORDER BY created_at DESC LIMIT 10")
     rows = c.fetchall(); conn.close()
@@ -3191,7 +3190,7 @@ async def fsm_support_message(message: types.Message, state: FSMContext):
 # ─── Тех. поддержка: admin ───────────────────────────────────────────
 @dp.callback_query(F.data == "adm_tickets")
 async def cb_adm_tickets(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
@@ -3250,7 +3249,7 @@ async def fsm_ticket_reply(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "adm_tickets_all")
 async def cb_adm_tickets_all(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT id,user_id,username,is_premium,subject,status,created_at FROM support_tickets ORDER BY created_at DESC LIMIT 20")
     rows = c.fetchall(); conn.close()
@@ -3267,7 +3266,7 @@ async def cb_adm_tickets_all(callback: types.CallbackQuery):
 # ─── История покупок: admin ───────────────────────────────────────────
 @dp.callback_query(F.data == "adm_purchases")
 async def cb_adm_purchases(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
@@ -3322,7 +3321,7 @@ def _get_buckets(table: str, ts_col: str, period: str,
     where = f"WHERE {ts_col} >= '{since}'"
     if extra_where: where += f" AND {extra_where}"
     sel = f"{ts_col},{val_col}" if val_col else ts_col
-    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+    conn = sqlite3.connect(DB_PATH, timeout=10); c = conn.cursor()
     c.execute(f"SELECT {sel} FROM {table} {where} ORDER BY {ts_col}")
     rows = c.fetchall(); conn.close()
     buckets: dict = {}
@@ -3473,14 +3472,14 @@ async def cb_adm_chart_cmds(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "adm_promos")
 async def cb_adm_promos(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
     if not has_perm(callback.from_user.id, "moderator"):
         await callback.answer("❌ Нет прав", show_alert=True)
         return
-    conn2 = sqlite3.connect(DB_PATH)
+    conn2 = sqlite3.connect(DB_PATH, timeout=10)
     c2 = conn2.cursor()
     c2.execute("SELECT COUNT(*) FROM promo_codes")
     total_promos = c2.fetchone()[0]
@@ -3527,7 +3526,7 @@ async def cb_adm_promo_detail(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "adm_promo_create")
 async def cb_adm_promo_create(callback: types.CallbackQuery, state: FSMContext):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
@@ -3661,7 +3660,7 @@ async def fsm_promo_code_input(message: types.Message, state: FSMContext):
         if not new_p:
             await message.answer(f"❌ Промокод <code>{new_code}</code> не найден.", parse_mode="HTML"); return
         deactivate_promo(old_code)
-        conn_rp = sqlite3.connect(DB_PATH)
+        conn_rp = sqlite3.connect(DB_PATH, timeout=10)
         c_rp = conn_rp.cursor()
         c_rp.execute("UPDATE users SET active_promo=?, promo_expires=? WHERE active_promo=?",
                      (new_code, new_p["expires_at"], old_code))
@@ -3671,7 +3670,7 @@ async def fsm_promo_code_input(message: types.Message, state: FSMContext):
             f"<code>{old_code}</code> → <code>{new_code}</code>\n"
             f"Обновлено пользователей: <b>{affected}</b>", parse_mode="HTML")
     elif action == "detail":
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         c.execute("SELECT * FROM promo_codes WHERE code=?", (code,))
         row = c.fetchone()
@@ -3705,7 +3704,7 @@ async def fsm_promo_code_input(message: types.Message, state: FSMContext):
         await message.answer("\n".join(lines), parse_mode="HTML")
     elif action == "ref_user":
         query = code
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         if query.startswith("@"):
             c.execute("SELECT chat_id FROM users WHERE username=?", (query[1:],))
@@ -3830,7 +3829,7 @@ async def fsm_promo_code_input(message: types.Message, state: FSMContext):
         for i, opt in enumerate(real_opts):
             b_pc.button(text=opt, callback_data="prank_vote_" + str(pid_pc) + "_" + str(i))
         b_pc.adjust(1)
-        conn_pc = sqlite3.connect(DB_PATH)
+        conn_pc = sqlite3.connect(DB_PATH, timeout=10)
         cur_pc = conn_pc.cursor()
         cur_pc.execute("SELECT chat_id FROM users WHERE banned!='True'")
         users_pc = [r[0] for r in cur_pc.fetchall()]; conn_pc.close()
@@ -3867,14 +3866,14 @@ async def fsm_promo_code_input(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "adm_ref_stats")
 async def cb_adm_ref_stats(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("SELECT admin FROM users WHERE chat_id=?", (callback.from_user.id,))
     row = c.fetchone(); conn.close()
     if not has_perm(callback.from_user.id, "moderator"):
         await callback.answer("❌ Нет прав", show_alert=True)
         return
-    conn2 = sqlite3.connect(DB_PATH)
+    conn2 = sqlite3.connect(DB_PATH, timeout=10)
     c2 = conn2.cursor()
     c2.execute("SELECT COUNT(*) FROM referrals")
     total = c2.fetchone()[0]
@@ -3929,7 +3928,7 @@ async def _doc_inner(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or f"user_{user_id}"
 
-    banned_flag, ban_reason = is_banned(user_id)
+    banned_flag, ban_reason = await asyncio.to_thread(is_banned, user_id)
     if banned_flag:
         await message.answer(f"🚫 Вы заблокированы. Причина: {ban_reason or '—'}"); return
 
@@ -3939,19 +3938,19 @@ async def _doc_inner(message: types.Message, state: FSMContext):
     file_name = message.document.file_name
     file_format = file_name.rsplit('.', 1)[-1].lower() if '.' in file_name else ''
 
-    sub, message_to_send = await update(user_id, username)
+    sub, message_to_send = await asyncio.to_thread(update, user_id, username)
     current_state = await state.get_state()
     if sub:
         await message.answer(message_to_send); return
 
     is_subscribed, expiry_date_value = await get_user_status_async(user_id)
 
-    allowed, blocked_until = check_antispam(user_id, is_paid=is_subscribed)
+    allowed, blocked_until = await asyncio.to_thread(check_antispam, user_id, is_subscribed)
     if not allowed:
         secs = max(0, int(blocked_until - time.time()))
         await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
 
-    file_ok, file_blocked_until = check_file_antispam(user_id, is_paid=is_subscribed)
+    file_ok, file_blocked_until = await asyncio.to_thread(check_file_antispam, user_id, is_subscribed)
     if not file_ok:
         secs = max(0, int(file_blocked_until - time.time()))
         await message.answer(
@@ -3989,7 +3988,7 @@ async def _doc_inner(message: types.Message, state: FSMContext):
                 f"Купите Premium для работы с большими файлами 👇",
                 reply_markup=kb_subscription_plans(), parse_mode="HTML"); return
 
-    inc_msg_count(user_id)
+    await asyncio.to_thread(inc_msg_count, user_id)
 
     queue_msg = None
     if is_subscribed:
@@ -4683,17 +4682,17 @@ async def _ok_inner(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or f"user_{user_id}"
 
-    banned_flag, ban_reason = is_banned(user_id)
+    banned_flag, ban_reason = await asyncio.to_thread(is_banned, user_id)
     if banned_flag:
         await message.answer(f"🚫 Вы заблокированы. Причина: {ban_reason or '—'}"); return
 
-    sub, message_to_send = await update(user_id, username)
+    sub, message_to_send = await asyncio.to_thread(update, user_id, username)
     if sub:
         await message.answer(message_to_send); return
 
     is_subscribed, expiry_date_value = await get_user_status_async(user_id)
 
-    allowed, blocked_until = check_antispam(user_id, is_paid=is_subscribed)
+    allowed, blocked_until = await asyncio.to_thread(check_antispam, user_id, is_subscribed)
     if not allowed:
         secs = max(0, int(blocked_until - time.time()))
         await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
@@ -4703,7 +4702,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.warning(f"send_log: {e}")
 
-    inc_msg_count(user_id)
+    await asyncio.to_thread(inc_msg_count, user_id)
 
     j = message.text.split()
 
@@ -4752,7 +4751,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
         await message.answer("\n".join(lines), parse_mode="HTML"); return
 
     if "/admin" in message.text:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
         row = c.fetchone(); conn.close()
@@ -4770,7 +4769,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
         await message.answer(text, reply_markup=kb_admin_main(user_id), parse_mode="HTML"); return
 
     if message.text.startswith("/addchannel"):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
         row = c.fetchone(); conn.close()
@@ -4784,7 +4783,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
         await message.answer(f"✅ Канал {ch} добавлен в обязательные."); return
 
     if message.text.startswith("/delchannel"):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
         row = c.fetchone(); conn.close()
@@ -4798,7 +4797,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
         await message.answer(f"{'✅ Удалён' if ok_del else '❌ Не найден'}: {ch}"); return
 
     if message.text.startswith("/ban "):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
         row = c.fetchone(); conn.close()
@@ -4814,7 +4813,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
         return
 
     if message.text.startswith("/unban "):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
         row = c.fetchone(); conn.close()
@@ -4829,7 +4828,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
         return
 
     if message.text.startswith("/givesub"):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         c.execute("SELECT admin FROM users WHERE chat_id=?", (user_id,))
         row = c.fetchone(); conn.close()
@@ -5481,7 +5480,17 @@ async def _ok_inner(message: types.Message, state: FSMContext):
         if is_processing_cmd:
             await queue_release(is_subscribed)
 
+def init_db():
+    """Enable WAL journal mode and set busy timeout for all future connections.
+    WAL allows concurrent reads+writes and eliminates most 'database is locked' errors."""
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.commit()
+    conn.close()
+
 async def main():
+    init_db()
     await setup_work_dirs()
     init_semaphores()
     await p_app.start()
