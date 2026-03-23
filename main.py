@@ -53,6 +53,33 @@ loging_id = [2080411409]
 boti = Bot(token=os.getenv("token2"))
 length = 4
 DB_PATH = 'users.db'
+import threading as _threading
+_db_write_lock = _threading.Lock()
+
+# Patch sqlite3.connect so every connection in this file automatically
+# gets WAL journal mode and a generous busy_timeout, regardless of call site.
+_orig_sqlite3_connect = sqlite3.connect
+def _patched_connect(db, **kwargs):
+    kwargs.setdefault("timeout", 15)
+    conn = _orig_sqlite3_connect(db, **kwargs)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn
+sqlite3.connect = _patched_connect
+
+# Single-worker executor for ALL SQLite operations.
+# SQLite cannot handle concurrent writers — serialising everything through one
+# thread eliminates 'database is locked' errors without needing external locks.
+_db_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sqlite')
+
+async def db_run(fn, *args):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_db_executor, fn, *args)
+
 BOT_NAME = "Pweper Bot"
 BOT_USERNAME = "pweper_bot"
 SUPPORT_USERNAME = "keedboy016"
@@ -1311,7 +1338,8 @@ def initialize_database():
         discount_pct INTEGER DEFAULT 0,
         created_at TEXT
     )''')
-    for col4, def4 in [("trial_used","'False'"),("active_promo","NULL"),("promo_expires","NULL")]:
+    for col4, def4 in [("trial_used","'False'"),("active_promo","NULL"),("promo_expires","NULL"),
+                        ("referred_by","NULL"),("ref_balance","'0'")]:
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col4} TEXT DEFAULT {def4}")
         except:
@@ -1371,7 +1399,12 @@ def find_user_data_in_sql(user_id):
     return False, None
 
 async def get_user_status_async(user_id):
-    return await asyncio.to_thread(find_user_data_in_sql, user_id)
+    return await db_run(find_user_data_in_sql, user_id)
+
+async def aexecute_sql_query(query, params=(), fetchone=False, fetchall=False):
+    import functools
+    fn = functools.partial(execute_sql_query, query, params, fetchone, fetchall)
+    return await db_run(fn)
 
 def execute_sql_query(query, params=(), fetchone=False, fetchall=False):
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -3928,7 +3961,7 @@ async def _doc_inner(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or f"user_{user_id}"
 
-    banned_flag, ban_reason = await asyncio.to_thread(is_banned, user_id)
+    banned_flag, ban_reason = await db_run(is_banned, user_id)
     if banned_flag:
         await message.answer(f"🚫 Вы заблокированы. Причина: {ban_reason or '—'}"); return
 
@@ -3938,19 +3971,19 @@ async def _doc_inner(message: types.Message, state: FSMContext):
     file_name = message.document.file_name
     file_format = file_name.rsplit('.', 1)[-1].lower() if '.' in file_name else ''
 
-    sub, message_to_send = await asyncio.to_thread(update, user_id, username)
+    sub, message_to_send = await db_run(update, user_id, username)
     current_state = await state.get_state()
     if sub:
         await message.answer(message_to_send); return
 
     is_subscribed, expiry_date_value = await get_user_status_async(user_id)
 
-    allowed, blocked_until = await asyncio.to_thread(check_antispam, user_id, is_subscribed)
+    allowed, blocked_until = await db_run(check_antispam, user_id, is_subscribed)
     if not allowed:
         secs = max(0, int(blocked_until - time.time()))
         await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
 
-    file_ok, file_blocked_until = await asyncio.to_thread(check_file_antispam, user_id, is_subscribed)
+    file_ok, file_blocked_until = await db_run(check_file_antispam, user_id, is_subscribed)
     if not file_ok:
         secs = max(0, int(file_blocked_until - time.time()))
         await message.answer(
@@ -3988,7 +4021,7 @@ async def _doc_inner(message: types.Message, state: FSMContext):
                 f"Купите Premium для работы с большими файлами 👇",
                 reply_markup=kb_subscription_plans(), parse_mode="HTML"); return
 
-    await asyncio.to_thread(inc_msg_count, user_id)
+    await db_run(inc_msg_count, user_id)
 
     queue_msg = None
     if is_subscribed:
@@ -4682,17 +4715,17 @@ async def _ok_inner(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or f"user_{user_id}"
 
-    banned_flag, ban_reason = await asyncio.to_thread(is_banned, user_id)
+    banned_flag, ban_reason = await db_run(is_banned, user_id)
     if banned_flag:
         await message.answer(f"🚫 Вы заблокированы. Причина: {ban_reason or '—'}"); return
 
-    sub, message_to_send = await asyncio.to_thread(update, user_id, username)
+    sub, message_to_send = await db_run(update, user_id, username)
     if sub:
         await message.answer(message_to_send); return
 
     is_subscribed, expiry_date_value = await get_user_status_async(user_id)
 
-    allowed, blocked_until = await asyncio.to_thread(check_antispam, user_id, is_subscribed)
+    allowed, blocked_until = await db_run(check_antispam, user_id, is_subscribed)
     if not allowed:
         secs = max(0, int(blocked_until - time.time()))
         await message.answer(f"🛑 <b>Антиспам:</b> подождите {secs} сек.", parse_mode="HTML"); return
@@ -4702,7 +4735,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.warning(f"send_log: {e}")
 
-    await asyncio.to_thread(inc_msg_count, user_id)
+    await db_run(inc_msg_count, user_id)
 
     j = message.text.split()
 
@@ -5426,10 +5459,10 @@ async def _ok_inner(message: types.Message, state: FSMContext):
                 parse_mode='HTML')
 
         elif "/sub" in message.text and len(j) >= 3:
-            admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
+            admin_status_row = await aexecute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
             if admin_status_row and admin_status_row[0] == 'True':
                 target_user_id = int(j[1])
-                target_user_row = execute_sql_query("SELECT username FROM users WHERE chat_id=?", (target_user_id,), fetchone=True)
+                target_user_row = await aexecute_sql_query("SELECT username FROM users WHERE chat_id=?", (target_user_id,), fetchone=True)
                 if target_user_row:
                     target_username = target_user_row[0]
                     action = j[2]
@@ -5437,20 +5470,20 @@ async def _ok_inner(message: types.Message, state: FSMContext):
                         expiry_date_str = j[3]
                         try:
                             datetime.datetime.strptime(expiry_date_str, "%d.%m.%Y")
-                            execute_sql_query("UPDATE users SET sub='True', time=? WHERE chat_id=?", (expiry_date_str, target_user_id))
+                            await aexecute_sql_query("UPDATE users SET sub='True', time=? WHERE chat_id=?", (expiry_date_str, target_user_id))
                             await message.answer(f'Пользователю {target_username} выдана подписка до {expiry_date_str}!')
                         except ValueError: await message.answer("Неверный формат даты! Используйте %d.%m.%Y.")
                     elif action == 'False':
-                        execute_sql_query("UPDATE users SET sub='False', time=NULL WHERE chat_id=?", (target_user_id,))
+                        await aexecute_sql_query("UPDATE users SET sub='False', time=NULL WHERE chat_id=?", (target_user_id,))
                         await message.answer(f"У пользователя {target_username} забрана подписка!")
                     else: await message.answer("Неверный формат команды!")
                 else: await message.answer(f"Пользователь с ID {target_user_id} не найден.")
             else: await message.answer("У вас нет прав администратора.")
 
         elif "/kotek" in message.text:
-            admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
+            admin_status_row = await aexecute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
             if admin_status_row and admin_status_row[0] == 'True':
-                all_users = execute_sql_query("SELECT chat_id FROM users", fetchall=True)
+                all_users = await aexecute_sql_query("SELECT chat_id FROM users", fetchall=True)
                 message_to_send2 = message.text.replace("/kotek", "").strip()
                 if message_to_send2:
                     for user_row in all_users:
@@ -5462,7 +5495,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
             else: await message.answer("У вас нет прав администратора.")
 
         elif "/send" in message.text:
-            admin_status_row = execute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
+            admin_status_row = await aexecute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
             if admin_status_row and admin_status_row[0] == 'True':
                 try:
                     target_id_str = j[1]
@@ -5481,13 +5514,11 @@ async def _ok_inner(message: types.Message, state: FSMContext):
             await queue_release(is_subscribed)
 
 def init_db():
-    """Enable WAL journal mode and set busy timeout for all future connections.
-    WAL allows concurrent reads+writes and eliminates most 'database is locked' errors."""
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.commit()
+    """WAL mode is applied automatically via the patched sqlite3.connect().
+    This function triggers a first connection so the pragma is set before polling starts."""
+    conn = sqlite3.connect(DB_PATH)
     conn.close()
+    logging.info("[DB] WAL mode active, busy_timeout=10000ms, single-thread executor ready")
 
 async def main():
     init_db()
