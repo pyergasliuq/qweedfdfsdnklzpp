@@ -4320,7 +4320,7 @@ async def _doc_inner(message: types.Message, state: FSMContext):
             jjj = f'work/work_MAP/{r}/restored_radar.png'
             restored_img.save(jjj, format='PNG', quality=95)
             await y.delete()
-            await t_client.send_file(message.chat.id, jjj, caption=f'<b>⚡️Восстановленное изображение готово!</b>', parse_mode=enums.ParseMode.HTML, force_document=True)
+            await t_client.send_file(message.chat.id, jjj, caption=f'<b>⚡️Восстановленное изображение готово!</b>', parse_mode='html', force_document=True)
 
         elif '/hudcut' in caption:
             if file_format not in ["png", "jpg", "jpeg"]:
@@ -4347,7 +4347,7 @@ async def _doc_inner(message: types.Message, state: FSMContext):
             await p_app.download_media(message.document.file_id, file_name=download_path)
             await asyncio.to_thread(assemble_image_from_zip_bytes, download_path, f'work/work_HUD/{r}/rehud_{r}.png')
             await y.delete()
-            await t_client.send_file(message.chat.id, f'work/work_HUD/{r}/rehud_{r}.png', caption=f'<b>⚡️Восстановленное изображение готово!</b>', parse_mode=enums.ParseMode.HTML, force_document=True)
+            await t_client.send_file(message.chat.id, f'work/work_HUD/{r}/rehud_{r}.png', caption=f'<b>⚡️Восстановленное изображение готово!</b>', parse_mode='html', force_document=True)
 
         elif '/genrl' in caption:
             work_dir = Path(f'work/work_BPC/{r}')
