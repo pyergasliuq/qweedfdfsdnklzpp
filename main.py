@@ -31,7 +31,6 @@ from skimage.filters import threshold_otsu
 from scipy.ndimage import gaussian_filter
 from pyrogram import Client, enums
 from telethon import TelegramClient, events, Button
-from groq import Groq
 import colorsys
 from sklearn.cluster import KMeans
 from aiogram.fsm.context import FSMContext
@@ -42,8 +41,171 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("TOKEN")
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
+# ══════════════════════════════════════════════════════════════════════
+# AI CLIENT — встроенный двухступенчатый AI (Groq → OnlySQ fallback)
+# ══════════════════════════════════════════════════════════════════════
+import httpx as _httpx
+
+GROQ_API_KEY    = os.getenv("GROQ_API_KEY", "")
+ONLYSQ_API_KEY  = os.getenv("ONLYSQ_API_KEY", "")
+ONLYSQ_BASE_URL = os.getenv("ONLYSQ_BASE_URL", "https://api.onlysq.ru/v1")
+
+# Модели по уровням: tier → (groq_model, onlysq_model)
+AI_MODELS: dict = {
+    "light":  ("gemma2-9b-it",            "llama-3.1-8b"),
+    "medium": ("llama-3.1-8b-instant",    "Qwen/Qwen2.5-72B-Instruct"),
+    "best":   ("llama-3.3-70b-versatile", "gpt-4o"),
+}
+AI_MODEL_LABELS = {
+    "light":  "⚡ Лёгкая",
+    "medium": "⚖️ Средняя",
+    "best":   "💎 Лучшая",
+}
+AI_MODEL_DESCRIPTIONS = {
+    "light":  "Быстрая, много запросов",
+    "medium": "Сбалансированная",
+    "best":   "Максимальное качество · 1 запрос/мин",
+}
+
+# Лимиты (запросов в 60 сек)
+AI_RATE_LIMITS: dict = {
+    "free": {"light": 1,  "medium": 0,  "best": 0},
+    "paid": {"light": 10, "medium": 5,  "best": 1},
+}
+AI_RATE_MESSAGES = {
+    "free": {
+        "light":  "⏳ Лимит запросов: 1 в минуту для бесплатных пользователей.\n💎 Купите Premium — /start",
+        "medium": "❌ Эта модель доступна только Premium-пользователям.",
+        "best":   "❌ Эта модель доступна только Premium-пользователям.",
+    },
+    "paid": {
+        "light":  "⏳ Подождите — лимит 10 запросов в минуту.",
+        "medium": "⏳ Подождите — лимит 5 запросов в минуту.",
+        "best":   "⏳ Лимит лучшей модели: 1 запрос в минуту. Попробуйте через мгновение.",
+    },
+}
+
+_groq_client = None
+
+def _get_groq():
+    global _groq_client
+    if _groq_client is None and GROQ_API_KEY:
+        from groq import Groq as _Groq
+        _groq_client = _Groq(api_key=GROQ_API_KEY)
+    return _groq_client
+
+def check_ai_rate(user_id: int, tier: str, is_paid: bool):
+    """Проверяет rate-limit. Возвращает (allowed, retry_secs, error_msg)."""
+    plan = "paid" if is_paid else "free"
+    limit = AI_RATE_LIMITS[plan].get(tier, 0)
+    if limit == 0:
+        msg = AI_RATE_MESSAGES[plan].get(tier, "❌ Недоступно.")
+        return False, 60.0, msg
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    c = conn.cursor()
+    now = time.time()
+    key = f"{user_id}:{tier}"
+    c.execute("SELECT window_start, count FROM ai_rate WHERE key=?", (key,))
+    row = c.fetchone()
+    allowed = True; retry = 0.0
+    if row:
+        ws, cnt = row
+        elapsed = now - ws
+        if elapsed < 60:
+            if cnt >= limit:
+                retry = 60.0 - elapsed; allowed = False
+            else:
+                c.execute("UPDATE ai_rate SET count=count+1 WHERE key=?", (key,))
+        else:
+            c.execute("UPDATE ai_rate SET window_start=?, count=1 WHERE key=?", (now, key))
+    else:
+        c.execute("INSERT INTO ai_rate (key, window_start, count) VALUES (?,?,1)", (key, now))
+    conn.commit(); conn.close()
+    if not allowed:
+        msg = AI_RATE_MESSAGES[plan].get(tier, "⏳ Лимит запросов, подождите.")
+        secs = max(1, int(retry))
+        msg += f"\n⏱ Ожидайте {secs} сек."
+        return False, retry, msg
+    return True, 0.0, ""
+
+def _call_groq_sync(messages: list, tier: str, temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    groq = _get_groq()
+    if not groq:
+        raise RuntimeError("Groq API ключ не задан")
+    model = AI_MODELS[tier][0]
+    completion = groq.chat.completions.create(
+        messages=messages, model=model, temperature=temperature, max_tokens=max_tokens)
+    return completion.choices[0].message.content.strip()
+
+def _call_onlysq_sync(messages: list, tier: str, temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    if not ONLYSQ_API_KEY:
+        raise RuntimeError("OnlySQ API ключ не задан")
+    model = AI_MODELS[tier][1]
+    resp = _httpx.post(
+        f"{ONLYSQ_BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {ONLYSQ_API_KEY}", "Content-Type": "application/json"},
+        json={"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens},
+        timeout=45.0,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+def ai_call_sync(messages: list, tier: str = "light", temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    """Groq → OnlySQ fallback. Провайдер пользователю не раскрывается."""
+    if GROQ_API_KEY:
+        try:
+            result = _call_groq_sync(messages, tier, temperature, max_tokens)
+            logging.debug(f"[AI] Groq OK tier={tier}")
+            return result
+        except Exception as e:
+            logging.warning(f"[AI] Groq failed (tier={tier}): {e} → trying OnlySQ")
+    if ONLYSQ_API_KEY:
+        try:
+            result = _call_onlysq_sync(messages, tier, temperature, max_tokens)
+            logging.debug(f"[AI] OnlySQ OK tier={tier}")
+            return result
+        except Exception as e:
+            logging.error(f"[AI] OnlySQ failed (tier={tier}): {e}")
+            raise RuntimeError("AI-сервис временно недоступен. Попробуйте позже.")
+    raise RuntimeError("AI не настроен (нет API-ключей). Обратитесь к разработчику.")
+
+async def ai_call(messages: list, tier: str = "light", temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    """Асинхронная обёртка."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: ai_call_sync(messages, tier, temperature, max_tokens))
+
+def get_user_ai_tier(user_id: int) -> str:
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    c = conn.cursor()
+    c.execute("SELECT ai_model FROM users WHERE chat_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    val = row[0] if row and row[0] else "light"
+    return val if val in AI_MODELS else "light"
+
+def set_user_ai_tier(user_id: int, tier: str):
+    if tier not in AI_MODELS:
+        return
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    c = conn.cursor()
+    c.execute("UPDATE users SET ai_model=? WHERE chat_id=?", (tier, user_id))
+    conn.commit(); conn.close()
+
+def init_ai_tables():
+    """Создаёт таблицы AI rate-limit и колонку ai_model. Вызывать в initialize_database()."""
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS ai_rate (
+        key TEXT PRIMARY KEY,
+        window_start REAL DEFAULT 0,
+        count INTEGER DEFAULT 0
+    )""")
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN ai_model TEXT DEFAULT 'light'")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit(); conn.close()
+# ══════════════════════════════════════════════════════════════════════
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 p_app = Client("pyro_download_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -1352,6 +1514,7 @@ def initialize_database():
     else:
         c.execute("UPDATE users SET admin='True', role='developer', sub='True', time='31.12.2099' WHERE chat_id=?",
                   (OWNER_ID,))
+    init_ai_tables()
     conn.commit()
     conn.close()
 
@@ -1569,13 +1732,21 @@ def random_color():
     return '#{:02x}{:02x}{:02x}'.format(int(r*255), int(g*255), int(b*255)).upper()
 
 def get_hex_from_description(description):
+    """AI подбирает hex-цвет по текстовому описанию. Tier: light."""
     desc_clean = description.strip().lower()
-    completion = client.chat.completions.create(
-        messages=[{"role":"system","content":"Ты эксперт по колористике. Отвечай ТОЛЬКО hex-кодом (например, #FFFFFF), без лишних слов."},
-                  {"role":"user","content":f"Цвет: {desc_clean}"}],
-        model="llama-3.1-8b-instant", temperature=0.1)
-    hex_response = completion.choices[0].message.content.strip()
+    hex_response = ai_call_sync(
+        messages=[
+            {"role": "system",
+             "content": "Ты эксперт по колористике. Отвечай ТОЛЬКО hex-кодом (например, #FFFFFF), без лишних слов."},
+            {"role": "user", "content": f"Цвет: {desc_clean}"},
+        ],
+        tier="light",
+        temperature=0.1,
+        max_tokens=20,
+    )
     match = re.search(r'#[A-Fa-f0-9]{6}', hex_response)
+    if not match:
+        raise ValueError(f"AI не вернул hex-код: {hex_response!r}")
     return match.group(0).upper()
 
 def convert_zip2nonerai(src_file, temp_dir):
@@ -2391,19 +2562,30 @@ async def timecyc(j):
     with open(output_file_path, "w", encoding='utf-8') as f: f.write(timecyc_json_string)
     return output_file_path
 
-def _sync_aitimecyc(description: str) -> dict:
-    prompt = f"""Ты эксперт по настройке атмосферы в играх GTA SA.
-На основе описания "{description}" придумай цветовую схему для timecyc.
-Верни ТОЛЬКО JSON без пояснений:
-{{"SkyBottomRGB":[R,G,B],"SkyTopRGB":[R,G,B],"CloudRGB":[R,G,B],"SunCoreRGB":[R,G,B],"AmbientRGB":[R,G,B],"DirectionalRGB":[R,G,B],"FarClip":700.0,"FogStart":100.0}}
-Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400."""
-    completion = client.chat.completions.create(
-        messages=[{"role":"system","content":"Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
-                  {"role":"user","content":prompt}],
-        model="llama-3.1-8b-instant", temperature=0.7)
-    raw = completion.choices[0].message.content.strip()
+def _sync_aitimecyc(description: str, tier: str = "light") -> dict:
+    """Генерирует параметры timecyc по описанию через AI."""
+    prompt = (
+        f'Ты эксперт по настройке атмосферы в играх GTA SA.\n'
+        f'На основе описания "{description}" придумай цветовую схему для timecyc.\n'
+        'Верни ТОЛЬКО JSON без пояснений:\n'
+        '{"SkyBottomRGB":[R,G,B],"SkyTopRGB":[R,G,B],"CloudRGB":[R,G,B],'
+        '"SunCoreRGB":[R,G,B],"AmbientRGB":[R,G,B],"DirectionalRGB":[R,G,B],'
+        '"FarClip":700.0,"FogStart":100.0}\n'
+        'Все значения RGB от 0 до 255. FarClip от 300 до 1500. FogStart от 0 до 400.'
+    )
+    raw = ai_call_sync(
+        messages=[
+            {"role": "system",
+             "content": "Ты генератор JSON для настроек атмосферы игры. Отвечай ТОЛЬКО валидным JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        tier=tier,
+        temperature=0.7,
+        max_tokens=300,
+    )
     match = re.search(r'\{[\s\S]*\}', raw)
-    if not match: raise ValueError("AI не вернул валидный JSON")
+    if not match:
+        raise ValueError("AI не вернул валидный JSON")
     return json.loads(match.group(0))
 
 def generate_aitimecyc_json(ai_colors: dict) -> str:
@@ -3947,6 +4129,218 @@ async def cb_adm_ref_stats(callback: types.CallbackQuery):
     await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup(),
                                      parse_mode="HTML")
 
+# ══════════════════════════════════════════════════════
+# ⚙️  SETTINGS — пользовательские настройки
+# ══════════════════════════════════════════════════════
+
+def kb_settings_main(user_id: int, is_paid: bool) -> types.InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🔷 Настройки BTX", callback_data="stg_btx_menu")
+    if is_paid:
+        tier = get_user_ai_tier(user_id)
+        lbl  = AI_MODEL_LABELS.get(tier, "⚡ Лёгкая")
+        b.button(text=f"🤖 AI модель: {lbl}", callback_data="stg_ai_menu")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def kb_btx_block() -> types.InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for key in BTX_BLOCK_MAP:
+        b.button(text=f"🔷 {key}", callback_data=f"stg_btx_block_{key}")
+    b.button(text="⬅️ Назад", callback_data="stg_main")
+    b.adjust(3)
+    return b.as_markup()
+
+
+def kb_btx_quality() -> types.InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    quality_names = list(BTX_QUALITY_MAP.keys())
+    for name in quality_names:
+        b.button(text=f"⚙️ {name}", callback_data=f"stg_btx_quality_{name}")
+    b.button(text="⬅️ Назад", callback_data="stg_btx_menu")
+    b.adjust(3)
+    return b.as_markup()
+
+
+def kb_ai_tier(is_paid: bool) -> types.InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    if is_paid:
+        for tier, label in AI_MODEL_LABELS.items():
+            desc = AI_MODEL_DESCRIPTIONS.get(tier, "")
+            b.button(text=f"{label} — {desc}", callback_data=f"stg_ai_tier_{tier}")
+    b.button(text="⬅️ Назад", callback_data="stg_main")
+    b.adjust(1)
+    return b.as_markup()
+
+
+async def show_settings_menu(message_or_call, user_id: int, is_paid: bool):
+    s = btx_user_settings.get(user_id, {})
+    bw, bh = s.get("block", BTX_DEFAULT_BLOCK)
+    qname   = s.get("quality_name", "medium")
+    tier    = get_user_ai_tier(user_id)
+    ai_lbl  = AI_MODEL_LABELS.get(tier, "—")
+    ai_desc = AI_MODEL_DESCRIPTIONS.get(tier, "")
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"🔷 <b>BTX:</b> блок <code>{bw}x{bh}</code> · качество <code>{qname}</code>\n"
+    )
+    if is_paid:
+        text += f"🤖 <b>AI модель:</b> {ai_lbl} — {ai_desc}\n"
+    else:
+        text += "🤖 <b>AI модель:</b> только лёгкая (Premium → выбор модели)\n"
+    kb = kb_settings_main(user_id, is_paid)
+    if hasattr(message_or_call, "message"):
+        await message_or_call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message_or_call.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "stg_main")
+async def cb_stg_main(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    is_paid, _ = await get_user_status_async(uid)
+    await show_settings_menu(callback, uid, is_paid)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "stg_btx_menu")
+async def cb_stg_btx_menu(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    s   = btx_user_settings.get(uid, {})
+    bw, bh = s.get("block", BTX_DEFAULT_BLOCK)
+    qname   = s.get("quality_name", "medium")
+    b = InlineKeyboardBuilder()
+    b.button(text="🔷 Изменить блок",    callback_data="stg_btx_block_menu")
+    b.button(text="⚙️ Изменить качество", callback_data="stg_btx_quality_menu")
+    b.button(text="⬅️ Назад", callback_data="stg_main")
+    b.adjust(1)
+    await callback.message.edit_text(
+        f"🔷 <b>Настройки BTX</b>\n\n"
+        f"Текущий блок: <code>{bw}x{bh}</code>\n"
+        f"Текущее качество: <code>{qname}</code>\n\n"
+        "Выберите параметр для изменения:",
+        reply_markup=b.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "stg_btx_block_menu")
+async def cb_stg_btx_block_menu(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🔷 <b>Выберите размер блока ASTC:</b>\n\n"
+        "<i>8x8 — оптимально для большинства случаев</i>",
+        reply_markup=kb_btx_block(), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("stg_btx_block_"))
+async def cb_stg_btx_block(callback: types.CallbackQuery):
+    uid   = callback.from_user.id
+    block = callback.data.replace("stg_btx_block_", "")
+    if block not in BTX_BLOCK_MAP:
+        await callback.answer("❌ Неверный блок", show_alert=True); return
+    bw, bh = BTX_BLOCK_MAP[block]
+    s = btx_user_settings.get(uid, {})
+    s["block"] = (bw, bh)
+    btx_user_settings[uid] = s
+    await callback.answer(f"✅ Блок {bw}x{bh} сохранён")
+    qname = s.get("quality_name", "medium")
+    b = InlineKeyboardBuilder()
+    b.button(text="🔷 Изменить блок",    callback_data="stg_btx_block_menu")
+    b.button(text="⚙️ Изменить качество", callback_data="stg_btx_quality_menu")
+    b.button(text="⬅️ Назад", callback_data="stg_main")
+    b.adjust(1)
+    await callback.message.edit_text(
+        f"🔷 <b>Настройки BTX</b>\n\n"
+        f"Текущий блок: <code>{bw}x{bh}</code>\n"
+        f"Текущее качество: <code>{qname}</code>\n\n"
+        "Выберите параметр для изменения:",
+        reply_markup=b.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "stg_btx_quality_menu")
+async def cb_stg_btx_quality_menu(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "⚙️ <b>Выберите качество компрессии BTX:</b>\n\n"
+        "• <b>fastest</b> — минимальное, максимальная скорость\n"
+        "• <b>fast</b> — быстрое\n"
+        "• <b>medium</b> — сбалансированное (рекомендуется)\n"
+        "• <b>thorough</b> — высокое качество\n"
+        "• <b>exhaustive</b> — максимальное (медленно)",
+        reply_markup=kb_btx_quality(), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("stg_btx_quality_"))
+async def cb_stg_btx_quality(callback: types.CallbackQuery):
+    uid   = callback.from_user.id
+    qname = callback.data.replace("stg_btx_quality_", "")
+    if qname not in BTX_QUALITY_MAP:
+        await callback.answer("❌ Неверное качество", show_alert=True); return
+    q = BTX_QUALITY_MAP[qname]
+    s = btx_user_settings.get(uid, {})
+    s["quality"] = q
+    s["quality_name"] = qname
+    btx_user_settings[uid] = s
+    await callback.answer(f"✅ Качество «{qname}» сохранено")
+    bw, bh = s.get("block", BTX_DEFAULT_BLOCK)
+    b = InlineKeyboardBuilder()
+    b.button(text="🔷 Изменить блок",    callback_data="stg_btx_block_menu")
+    b.button(text="⚙️ Изменить качество", callback_data="stg_btx_quality_menu")
+    b.button(text="⬅️ Назад", callback_data="stg_main")
+    b.adjust(1)
+    await callback.message.edit_text(
+        f"🔷 <b>Настройки BTX</b>\n\n"
+        f"Текущий блок: <code>{bw}x{bh}</code>\n"
+        f"Текущее качество: <code>{qname}</code>\n\n"
+        "Выберите параметр для изменения:",
+        reply_markup=b.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "stg_ai_menu")
+async def cb_stg_ai_menu(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    is_paid, _ = await get_user_status_async(uid)
+    if not is_paid:
+        await callback.answer("💎 Только для Premium-пользователей", show_alert=True); return
+    tier     = get_user_ai_tier(uid)
+    cur_lbl  = AI_MODEL_LABELS.get(tier, "—")
+    cur_desc = AI_MODEL_DESCRIPTIONS.get(tier, "")
+    await callback.message.edit_text(
+        f"🤖 <b>Выбор AI модели</b>\n\n"
+        f"Текущая: <b>{cur_lbl}</b> — {cur_desc}\n\n"
+        "Выберите модель:\n\n"
+        "⚡ <b>Лёгкая</b> — много запросов, базовые задачи\n"
+        "⚖️ <b>Средняя</b> — до 5 запросов/мин, лучше качество\n"
+        "💎 <b>Лучшая</b> — 1 запрос/мин, максимальная точность",
+        reply_markup=kb_ai_tier(is_paid), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("stg_ai_tier_"))
+async def cb_stg_ai_tier(callback: types.CallbackQuery):
+    uid  = callback.from_user.id
+    tier = callback.data.replace("stg_ai_tier_", "")
+    is_paid, _ = await get_user_status_async(uid)
+    if not is_paid:
+        await callback.answer("💎 Только для Premium", show_alert=True); return
+    if tier not in AI_MODELS:
+        await callback.answer("❌ Неверная модель", show_alert=True); return
+    set_user_ai_tier(uid, tier)
+    lbl  = AI_MODEL_LABELS.get(tier, tier)
+    desc = AI_MODEL_DESCRIPTIONS.get(tier, "")
+    await callback.answer(f"✅ Модель {lbl} выбрана")
+    await callback.message.edit_text(
+        f"🤖 <b>Выбор AI модели</b>\n\n"
+        f"Текущая: <b>{lbl}</b> — {desc}\n\n"
+        "Выберите модель:\n\n"
+        "⚡ <b>Лёгкая</b> — много запросов, базовые задачи\n"
+        "⚖️ <b>Средняя</b> — до 5 запросов/мин, лучше качество\n"
+        "💎 <b>Лучшая</b> — 1 запрос/мин, максимальная точность",
+        reply_markup=kb_ai_tier(is_paid), parse_mode="HTML")
+
+# ══════════════════════════════════════════════════════
+
 @dp.message(F.document)
 async def handle_document_processing(message: types.Message, state: FSMContext):
     try:
@@ -5235,35 +5629,54 @@ async def _ok_inner(message: types.Message, state: FSMContext):
 
         elif "/aitimecyc" in message.text:
             if len(j) < 2:
-                await message.answer("❔ Формат: /aitimecyc <описание>\nПример: /aitimecyc закат с алыми облаками"); return
+                await message.answer(
+                    "❔ Формат: /aitimecyc <описание>\nПример: /aitimecyc закат с алыми облаками"); return
             description = message.text.replace("/aitimecyc", "", 1).strip()
+            tier = get_user_ai_tier(user_id)
+            allowed_ai, retry_ai, err_ai = await db_run(check_ai_rate, user_id, tier, is_subscribed)
+            if not allowed_ai:
+                await message.answer(err_ai); return
             y = await message.answer("🤖 <b>Генерирую таймсус...</b>", parse_mode="HTML")
             try:
-                loop = asyncio.get_running_loop()
-                ai_colors = await loop.run_in_executor(None, _sync_aitimecyc, description)
+                ai_colors = await asyncio.to_thread(_sync_aitimecyc, description, tier)
                 json_path = await asyncio.to_thread(generate_aitimecyc_json, ai_colors)
                 preview_path = await asyncio.to_thread(generate_sky_preview, ai_colors, description)
                 sky_top_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SkyTopRGB"])
                 sky_bot_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SkyBottomRGB"])
-                cloud_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["CloudRGB"])
-                sun_hex = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SunCoreRGB"])
+                cloud_hex   = '#{:02X}{:02X}{:02X}'.format(*ai_colors["CloudRGB"])
+                sun_hex     = '#{:02X}{:02X}{:02X}'.format(*ai_colors["SunCoreRGB"])
                 await y.delete()
                 await t_client.send_file(user_id, preview_path,
-                    caption=(f"🎨 <b>AI TimeCyc:</b>\n<i>{description}</i>\n\n"
-                             f"🌅 SkyTop: <code>{sky_top_hex}</code>\n🌄 SkyBottom: <code>{sky_bot_hex}</code>\n"
-                             f"☁️ Cloud: <code>{cloud_hex}</code>\n☀️ Sun: <code>{sun_hex}</code>"), parse_mode="HTML")
-                await t_client.send_file(user_id, json_path, caption='<b>⚡️ timecyc.json готов!</b>', parse_mode="HTML", force_document=True)
+                    caption=(
+                        f"🎨 <b>AI TimeCyc:</b>\n<i>{description}</i>\n\n"
+                        f"🌅 SkyTop: <code>{sky_top_hex}</code>\n"
+                        f"🌄 SkyBottom: <code>{sky_bot_hex}</code>\n"
+                        f"☁️ Cloud: <code>{cloud_hex}</code>\n"
+                        f"☀️ Sun: <code>{sun_hex}</code>"
+                    ), parse_mode="HTML")
+                await t_client.send_file(user_id, json_path,
+                    caption='<b>⚡️ timecyc.json готов!</b>', parse_mode="HTML", force_document=True)
                 os.remove(json_path); os.remove(preview_path)
-            except Exception as e: await message.answer(f"❌ Ошибка: {e}")
+            except Exception as e:
+                try: await y.delete()
+                except: pass
+                await message.answer(f"❌ Ошибка: {e}")
 
         elif "/aicolor" in message.text:
             if len(j) < 2:
                 await message.answer("❔ Пример: /aicolor свет от луны"); return
             description = message.text.replace("/aicolor ", "").strip()
-            hex_color = get_hex_from_description(description)
-            image_path = await kvadratik(hex_color)
-            await t_client.send_file(user_id, image_path, caption=f'🎨<b>Hex цвет - {hex_color}</b>', parse_mode="HTML")
-            os.remove(image_path)
+            allowed_ai, retry_ai, err_ai = await db_run(check_ai_rate, user_id, "light", is_subscribed)
+            if not allowed_ai:
+                await message.answer(err_ai); return
+            try:
+                hex_color = await asyncio.to_thread(get_hex_from_description, description)
+                image_path = await kvadratik(hex_color)
+                await t_client.send_file(user_id, image_path,
+                    caption=f'🎨<b>Hex цвет - {hex_color}</b>', parse_mode="HTML")
+                os.remove(image_path)
+            except Exception as e:
+                await message.answer(f"❌ Ошибка: {e}")
 
         elif "/randcolor" in message.text:
             hex_color = random_color()
@@ -5402,6 +5815,7 @@ async def _ok_inner(message: types.Message, state: FSMContext):
                 "/review — оставить отзыв\n"
                 "/support — техническая поддержка\n"
                 "/edit — запуск фотошопа\n"
+                "/settings — настройки бота (BTX, AI модель)\n"
                 "/help — помощь\n\n"
                 "<b>🎨 Работа с цветом:</b>\n"
                 "/color — покраска изображений\n"
@@ -5457,6 +5871,9 @@ async def _ok_inner(message: types.Message, state: FSMContext):
                 "<i>timecyc.dat</i> — конвертация в Black Russia\n"
                 "<i>timecyc.json</i> — цвета из Timecyc",
                 parse_mode='HTML')
+
+        elif "/settings" in message.text:
+            await show_settings_menu(message, user_id, is_subscribed)
 
         elif "/sub" in message.text and len(j) >= 3:
             admin_status_row = await aexecute_sql_query("SELECT admin FROM users WHERE chat_id=?", (user_id,), fetchone=True)
