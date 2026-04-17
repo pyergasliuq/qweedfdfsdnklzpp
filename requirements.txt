@@ -13,3 +13,4 @@ groq
 scikit-learn
 python-dotenv
 astc-encoder-py
+httpx
