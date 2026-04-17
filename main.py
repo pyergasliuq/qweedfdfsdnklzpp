@@ -191,9 +191,11 @@ def set_user_ai_tier(user_id: int, tier: str):
     c.execute("UPDATE users SET ai_model=? WHERE chat_id=?", (tier, user_id))
     conn.commit(); conn.close()
 
-def init_ai_tables():
+def init_ai_tables(conn=None):
     """Создаёт таблицы AI rate-limit и колонку ai_model. Вызывать в initialize_database()."""
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    _own = conn is None
+    if _own:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS ai_rate (
         key TEXT PRIMARY KEY,
@@ -204,7 +206,8 @@ def init_ai_tables():
         c.execute("ALTER TABLE users ADD COLUMN ai_model TEXT DEFAULT 'light'")
     except sqlite3.OperationalError:
         pass
-    conn.commit(); conn.close()
+    if _own:
+        conn.commit(); conn.close()
 # ══════════════════════════════════════════════════════════════════════
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -1514,7 +1517,7 @@ def initialize_database():
     else:
         c.execute("UPDATE users SET admin='True', role='developer', sub='True', time='31.12.2099' WHERE chat_id=?",
                   (OWNER_ID,))
-    init_ai_tables()
+    init_ai_tables(conn)
     conn.commit()
     conn.close()
 
